@@ -1,0 +1,14 @@
+{
+  "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-zipformer-vi-30M-int8-2026-02-09.tar.bz2",
+  "source_model": "hynt/Zipformer-30M-RNNT-6000h",
+  "license": "CC-BY-NC-ND-4.0",
+  "archive_sha256": "da8b637947091829d7ee9eda23da2a4ec7caa399233a3f4e34eb719fb2ea6b9b",
+  "files": {
+    "tokens.txt": "ca8171f8bbd516c050b627582f2125c8f5f1f6ed967ab41b0fa9aae2cf61b492",
+    "encoder.int8.onnx": "8ef5286dd427eb108055c2ddc1982aa31e544706072d5ea228729292dacade68",
+    "README.md": "25ef401db87cfa8025c7241a4b5eaa53835b84358177e1e70a3c98393e83a0bd",
+    "decoder.onnx": "cf2aa385b82c9d5d40cd29c3188af52d0249b3b78f0d4b7eb84ad502d50c7e7f",
+    "bpe.model": "002894e7a82d80ffa5e25008ec8c5496159db804005e2103de96b01b4c13d445",
+    "joiner.int8.onnx": "7311d2e17b810ecea515d79c71cc4668af8759256a06fa01d27047772320c821"
+  }
+}
