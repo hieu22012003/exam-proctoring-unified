@@ -24,7 +24,7 @@ Create a service from this GitHub repository. Railway detects the root `Dockerfi
 | `EXAMWATCH_THREADS` | `2` |
 | `EXAMWATCH_COOKIE_SECURE` | `1` |
 | `FIREBASE_PROJECT_ID` | `exam-proctoring-unified` |
-| `FIREBASE_STORAGE_BUCKET` | `exam-proctoring-unified.appspot.com` |
+| `FIREBASE_STORAGE_BUCKET` | `exam-proctoring-unified.firebasestorage.app` |
 | `FIREBASE_WEB_API_KEY` | Firebase Web API key |
 | `FIREBASE_SERVICE_ACCOUNT_JSON` | Full service-account JSON as a secret |
 | `EXAMWATCH_PHONE_MODEL_GCS_PATH` | `models/phone_detector_v5.pt` |

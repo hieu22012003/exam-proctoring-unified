@@ -30,7 +30,7 @@ Set these PowerShell variables before starting the backend, replacing the bucket
 
 ```powershell
 $env:FIREBASE_PROJECT_ID = 'exam-proctoring-unified'
-$env:FIREBASE_STORAGE_BUCKET = 'exam-proctoring-unified.appspot.com'
+$env:FIREBASE_STORAGE_BUCKET = 'exam-proctoring-unified.firebasestorage.app'
 $env:FIREBASE_WEB_API_KEY = 'your-firebase-web-api-key'
 $env:GOOGLE_APPLICATION_CREDENTIALS = 'C:\path\to\firebase-service-account.json'
 powershell -NoProfile -ExecutionPolicy Bypass -File .\start.ps1
