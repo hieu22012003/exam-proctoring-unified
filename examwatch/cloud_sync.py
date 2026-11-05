@@ -8,6 +8,7 @@ from pathlib import Path
 import queue
 import threading
 import time
+from .auth import firebase_admin_app
 
 logger = logging.getLogger(__name__)
 
@@ -17,28 +18,22 @@ class FirebaseSync:
         self.evidence_dir = evidence_dir
         self.project_id = os.getenv("FIREBASE_PROJECT_ID", "").strip()
         self.bucket_name = os.getenv("FIREBASE_STORAGE_BUCKET", "").strip()
-        self.credentials_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS", "").strip()
         self.db = self.bucket = None
         self.error = None
         self.queue = queue.Queue(maxsize=10000)
         self.stop_event = threading.Event()
-        configured = bool(self.project_id and self.bucket_name and self.credentials_path)
+        configured = bool(self.project_id and self.bucket_name and (
+            os.getenv("FIREBASE_SERVICE_ACCOUNT_JSON", "").strip()
+            or os.getenv("GOOGLE_APPLICATION_CREDENTIALS", "").strip()))
         if not configured:
             self.state = "not_configured"
             return
-        if not Path(self.credentials_path).is_file():
-            self.state = "error"
-            self.error = "Service account file is missing."
-            return
         try:
-            import firebase_admin
-            from firebase_admin import credentials, firestore, storage
+            from firebase_admin import firestore, storage
 
-            app = firebase_admin.initialize_app(
-                credentials.Certificate(self.credentials_path),
-                {"projectId": self.project_id, "storageBucket": self.bucket_name},
-                name=f"exam-proctoring-{self.project_id}",
-            )
+            app = firebase_admin_app()
+            if app is None:
+                raise RuntimeError("Firebase Admin credentials are not configured.")
             self.db = firestore.client(app=app)
             self.bucket = storage.bucket(app=app)
             self.state = "connected"
@@ -48,6 +43,34 @@ class FirebaseSync:
             self.state = "error"
             self.error = str(exc)
             logger.exception("Firebase initialization failed")
+
+    def download_model(self, object_path: str, destination: Path):
+        """Fetch one explicitly configured private model into the model directory."""
+        from pathlib import PurePosixPath
+
+        parts = PurePosixPath(object_path).parts
+        if (not self.bucket or not object_path or object_path.startswith("/")
+                or ".." in parts or "\\" in object_path):
+            return False
+        try:
+            blob = self.bucket.blob(object_path)
+            if not blob.exists(timeout=30):
+                self.error = f"Firebase Storage model was not found: {object_path}"
+                return False
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            temporary = destination.with_name(destination.name + ".download")
+            blob.download_to_filename(str(temporary), timeout=300)
+            if temporary.stat().st_size < 1_000_000 or temporary.stat().st_size > 500_000_000:
+                temporary.unlink(missing_ok=True)
+                self.error = "Firebase Storage model size is invalid."
+                return False
+            temporary.replace(destination)
+            self.error = None
+            return True
+        except Exception as exc:
+            self.error = str(exc)
+            logger.exception("Firebase model download failed")
+            return False
 
     def enqueue(self, action, collection, document_id, payload=None):
         if self.state not in {"connected", "degraded"}:

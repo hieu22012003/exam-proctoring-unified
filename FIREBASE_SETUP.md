@@ -19,8 +19,8 @@ On startup, existing SQLite rows are queued for initial backfill. New writes are
 1. Open the [Firebase project](https://console.firebase.google.com/project/exam-proctoring-unified/overview).
 2. Create a Cloud Firestore database and enable Cloud Storage.
 3. Copy the exact Storage bucket name from Firebase Console > Storage.
-4. In Project settings > Service accounts, create/download a service-account JSON key for local development. Use a dedicated account with only the required Firestore/Storage permissions.
-5. Put the key at `secrets/firebase-service-account.json` (git-ignored), or configure its actual path below.
+4. In Project settings > Service accounts, create/download a service-account JSON key. Use a dedicated account with only the required Firestore/Storage permissions.
+5. For local development, put the key at `secrets/firebase-service-account.json` (git-ignored). For Railway, add the complete JSON as the secret variable `FIREBASE_SERVICE_ACCOUNT_JSON`; never commit the key.
 6. Go to Authentication > Sign-in method and enable **Email/Password**.
 7. In Project settings > General > Your apps, register a Web app if needed and copy its Web API key.
 
@@ -41,3 +41,7 @@ Set the same variables in the PowerShell window before starting the app. `/api/a
 ## Data handling
 
 Enabling sync sends face embeddings, student names/IDs, observations, alerts, transcript text, settings and evidence media to this Firebase project. Admin SDK calls bypass client Security Rules, so protect the service-account key and restrict IAM roles. Never commit the JSON key.
+
+## Phone detector model for Railway
+
+The phone detector checkpoint is excluded from Git. Upload the existing local file `models/phone_detector_v5.pt` to the Firebase Storage bucket at `models/phone_detector_v5.pt`. Set `EXAMWATCH_PHONE_MODEL_GCS_PATH=models/phone_detector_v5.pt` on the backend. The backend downloads it into its persistent model directory on first use; the service account needs permission to read that object.

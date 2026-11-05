@@ -1,4 +1,5 @@
 from pathlib import Path
+import os
 import logging
 import queue
 import threading
@@ -51,6 +52,12 @@ class Runtime:
                                   for name in ['encoder.int8.onnx','decoder.onnx','joiner.int8.onnx','tokens.txt'])
         return status
 
+    def _download_phone_model(self):
+        phone_path = self.settings.models / "phone_detector_v5.pt"
+        gcs_path = os.getenv("EXAMWATCH_PHONE_MODEL_GCS_PATH", "").strip()
+        if not phone_path.is_file() and gcs_path:
+            self.store.cloud.download_model(gcs_path, phone_path)
+
     def configure_standing(self, seconds):
         if type(seconds) is not int or not 1<=seconds<=300:
             raise ValueError('Số giây cảnh báo phải là số nguyên từ 1 đến 300.')
@@ -68,11 +75,14 @@ class Runtime:
 
     def load_vision(self):
         if self.vision is None:
+            self._download_phone_model()
             if self.vision_factory:
                 self.vision = self.vision_factory(self.settings)
             else:
                 if not all(v for k, v in self.model_status().items() if k != "voice"):
-                    raise ValueError("Thiếu model hình ảnh. Chạy .\\prepare.ps1 trước.")
+                    missing = [name for name, ready in self.model_status().items()
+                               if name != "voice" and not ready]
+                    raise ValueError("Thiếu model hình ảnh: " + ", ".join(missing) + ".")
                 from .vision import Vision
                 self.vision = Vision(self.settings)
         return self.vision
@@ -81,6 +91,7 @@ class Runtime:
         with self.lock:
             if self.session:
                 raise ValueError("Đang có phiên thi hoạt động. Hãy kết thúc phiên hiện tại trước.")
+            self._download_phone_model()
             if not self.vision_factory and not all(self.model_status().values()):
                 raise ValueError("Thiếu model. Chạy .\\prepare.ps1 trước khi bắt đầu phiên offline.")
             self.load_vision()

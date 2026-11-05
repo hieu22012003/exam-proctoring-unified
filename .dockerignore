@@ -1,0 +1,12 @@
+.git
+.venv
+.tmp
+.vercel
+__pycache__
+*.py[cod]
+data
+secrets
+.env
+.env.*
+!.env.example
+video-*.mp4

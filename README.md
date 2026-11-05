@@ -38,6 +38,10 @@ Mở http://127.0.0.1:8000. Cho phép camera/microphone khi trình duyệt hỏi
 
 Đọc [FIREBASE_SETUP.md](FIREBASE_SETUP.md) để bật Firestore + Storage và cấu hình service account. SQLite vẫn là nguồn ghi chính tại chỗ; đồng bộ cloud chạy nền. Trạng thái nằm trong `/api/status`.
 
+## Deploy
+
+Xem [DEPLOYMENT.md](DEPLOYMENT.md) để deploy giao diện lên Vercel và backend FastAPI lên Railway, gồm thiết lập volume, biến Firebase và proxy API.
+
 ## Model và dữ liệu
 
 - `models/phone_detector_v5.pt`: model phát hiện điện thoại từ AI Exam Control.

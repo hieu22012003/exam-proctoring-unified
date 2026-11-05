@@ -13,13 +13,16 @@ FILES={'encoder.int8.onnx','decoder.onnx','joiner.int8.onnx','tokens.txt','bpe.m
 
 
 def main():
+    dest=Path(os.getenv('EXAMWATCH_MODELS',str(ROOT/'models')))/'zipformer-vi-30m';dest.mkdir(parents=True,exist_ok=True)
+    if all((dest/name).is_file() for name in FILES):
+        print('Original Zipformer INT8 already prepared')
+        return
     cache=ROOT/'.tmp';cache.mkdir(exist_ok=True)
     archive=cache/'zipformer-vi-30m.tar.bz2'
     if not archive.exists():
         urllib.request.urlretrieve(URL,archive)
     if hashlib.sha256(archive.read_bytes()).hexdigest()!=SHA256:
         raise ValueError('Zipformer archive checksum mismatch; remove corrupt cached archive and retry')
-    dest=Path(os.getenv('EXAMWATCH_MODELS',str(ROOT/'models')))/'zipformer-vi-30m';dest.mkdir(parents=True,exist_ok=True)
     found=set()
     with tarfile.open(archive) as source:
         for member in source.getmembers():

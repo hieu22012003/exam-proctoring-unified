@@ -71,7 +71,10 @@ def create_app(settings=None, runtime=None):
 
     app = FastAPI(title="ExamWatch Local", lifespan=lifespan)
     app.state.runtime = runtime
-    app.add_middleware(TrustedHostMiddleware, allowed_hosts=["127.0.0.1", "localhost", "testserver"])
+    trusted_hosts = {"127.0.0.1", "localhost", "testserver"}
+    trusted_hosts.update(host.strip() for host in os.getenv("EXAMWATCH_TRUSTED_HOSTS", "").split(",")
+                         if host.strip())
+    app.add_middleware(TrustedHostMiddleware, allowed_hosts=sorted(trusted_hosts))
 
     @app.middleware("http")
     async def require_firebase_session(request: Request, call_next):
@@ -96,10 +99,15 @@ def create_app(settings=None, runtime=None):
 
     @app.middleware("http")
     async def local_only(request: Request, call_next):
-        # A local demo must not accept cross-origin websites issuing capture mutations.
+        # Reject cross-site mutations, while allowing the production Vercel proxy origin.
         if request.method not in {"GET", "HEAD", "OPTIONS"}:
             origin = request.headers.get("origin")
-            if origin and origin != str(request.base_url).rstrip("/"):
+            request_origin = f"{request.url.scheme}://{request.url.netloc}".lower().rstrip("/")
+            allowed_origins = {request_origin}
+            allowed_origins.update(value.strip().lower().rstrip("/")
+                                   for value in os.getenv("EXAMWATCH_ALLOWED_ORIGINS", "").split(",")
+                                   if value.strip())
+            if origin and origin.lower().rstrip("/") not in allowed_origins:
                 return Response("Cross-origin request rejected", status_code=403)
             size = request.headers.get("content-length", "0")
             if not size.isdigit() or int(size) > 13_000_000:
@@ -128,6 +136,10 @@ def create_app(settings=None, runtime=None):
     def status():
         return runtime.status()
 
+    @app.get("/healthz")
+    def health():
+        return {"status": "ok"}
+
     @app.get("/api/auth/config")
     def auth_config():
         return auth_configuration()
@@ -137,7 +149,8 @@ def create_app(settings=None, runtime=None):
         if os.getenv("EXAMWATCH_DEMO_MODE", "").strip() != "1":
             raise HTTPException(404, "Chế độ mô phỏng chưa bật.")
         response.set_cookie("examwatch_session", "local-demo-session", max_age=2 * 60 * 60,
-                            httponly=True, secure=False, samesite="strict", path="/")
+                            httponly=True, secure=os.getenv("EXAMWATCH_COOKIE_SECURE", "") == "1",
+                            samesite="strict", path="/")
         return {"ok": True, "demo": True}
 
     @app.post("/api/auth/session")
@@ -153,7 +166,8 @@ def create_app(settings=None, runtime=None):
         except Exception as exc:
             raise HTTPException(401, "Không xác thực được tài khoản Firebase.") from exc
         response.set_cookie("examwatch_session", session_cookie, max_age=8 * 60 * 60,
-                            httponly=True, secure=False, samesite="strict", path="/")
+                            httponly=True, secure=os.getenv("EXAMWATCH_COOKIE_SECURE", "") == "1",
+                            samesite="strict", path="/")
         return {"ok": True}
 
     @app.get("/api/auth/me")
@@ -163,7 +177,9 @@ def create_app(settings=None, runtime=None):
 
     @app.post("/api/auth/logout")
     def auth_logout(response: Response):
-        response.delete_cookie("examwatch_session", path="/", httponly=True, samesite="strict")
+        response.delete_cookie("examwatch_session", path="/", httponly=True,
+                               secure=os.getenv("EXAMWATCH_COOKIE_SECURE", "") == "1",
+                               samesite="strict")
         return {"ok": True}
 
     @app.post('/api/settings/alerts')
