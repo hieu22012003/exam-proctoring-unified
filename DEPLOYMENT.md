@@ -31,8 +31,10 @@ Create a service from this GitHub repository. Railway detects the root `Dockerfi
 | `EXAMWATCH_ALLOWED_ORIGINS` | Exact Vercel production origin, added after step 3 |
 | `EXAMWATCH_TRUSTED_HOSTS` | `*.up.railway.app,*.vercel.app` |
 | `EXAMWATCH_2FA_EMAIL` | `1` to require a 6-digit email code after every sign-in (password or Google) |
-| `BREVO_API_KEY` | Brevo transactional email API key (secret). Railway blocks outbound SMTP on Trial/Hobby, so codes are sent over Brevo's HTTPS API |
-| `EXAMWATCH_MAIL_FROM` | Sender address verified in Brevo (Senders & IP → Senders) |
+| `EXAMWATCH_MAIL_WEBHOOK_URL` | Gmail relay: `/exec` URL of `scripts/gmail_relay.gs` deployed as an Apps Script web app (see the setup notes in that file). Railway blocks outbound SMTP on Trial/Hobby, so mail goes over HTTPS |
+| `EXAMWATCH_MAIL_WEBHOOK_SECRET` | Secret printed by the script's `setup` function |
+| `BREVO_API_KEY` | Alternative to the Gmail relay: Brevo transactional email API key (secret) |
+| `EXAMWATCH_MAIL_FROM` | With Brevo: sender address verified in Brevo (Senders & IP → Senders) |
 | `EXAMWATCH_MAIL_NAME` | Optional sender name, default `ExamWatch` |
 
 Google sign-in: enable the Google provider in Firebase Authentication → Sign-in method, and add every Vercel domain the app is served from to Authentication → Settings → Authorized domains.

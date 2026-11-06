@@ -32,8 +32,20 @@ def two_factor_enabled() -> bool:
     return os.getenv("EXAMWATCH_2FA_EMAIL", "").strip() == "1"
 
 
+def _gmail_relay():
+    url = os.getenv("EXAMWATCH_MAIL_WEBHOOK_URL", "").strip()
+    secret = os.getenv("EXAMWATCH_MAIL_WEBHOOK_SECRET", "").strip()
+    return (url, secret) if url and secret else None
+
+
+def _brevo():
+    key = os.getenv("BREVO_API_KEY", "").strip()
+    sender = os.getenv("EXAMWATCH_MAIL_FROM", "").strip()
+    return (key, sender) if key and sender else None
+
+
 def mail_configured() -> bool:
-    return bool(os.getenv("BREVO_API_KEY", "").strip() and os.getenv("EXAMWATCH_MAIL_FROM", "").strip())
+    return bool(_gmail_relay() or _brevo())
 
 
 def mask_email(email: str) -> str:
@@ -134,23 +146,62 @@ class OtpStore:
                 self._items.pop(token, None)
 
 
-def send_code_email(email: str, code: str):
-    api_key = os.getenv("BREVO_API_KEY", "").strip()
-    sender = os.getenv("EXAMWATCH_MAIL_FROM", "").strip()
-    if not api_key or not sender:
-        raise RuntimeError("Chưa cấu hình dịch vụ gửi email (BREVO_API_KEY, EXAMWATCH_MAIL_FROM).")
+def _message(code: str):
     minutes = CODE_TTL_SECONDS // 60
+    subject = f"Mã đăng nhập ExamWatch: {code}"
+    html_body = (
+        "<div style=\"font-family:Arial,sans-serif;color:#1d2b36;max-width:420px\">"
+        "<p>Mã xác thực đăng nhập ExamWatch của bạn là:</p>"
+        f"<p style=\"font-size:32px;font-weight:700;letter-spacing:6px;color:#127986\">{html.escape(code)}</p>"
+        f"<p>Mã có hiệu lực trong {minutes} phút. Nếu bạn không đăng nhập, hãy bỏ qua email này "
+        "và đổi mật khẩu.</p></div>")
+    text = f"Mã đăng nhập ExamWatch: {code} (hiệu lực {minutes} phút)."
+    return subject, html_body, text
+
+
+def _sender_name():
+    return os.getenv("EXAMWATCH_MAIL_NAME", "ExamWatch").strip() or "ExamWatch"
+
+
+def send_code_email(email: str, code: str):
+    """Send the code through the Gmail Apps Script relay if configured, else Brevo."""
+    if _gmail_relay():
+        return _send_gmail_relay(email, code)
+    if _brevo():
+        return _send_brevo(email, code)
+    raise RuntimeError("Chưa cấu hình dịch vụ gửi email (EXAMWATCH_MAIL_WEBHOOK_URL/SECRET hoặc BREVO_API_KEY).")
+
+
+def _send_gmail_relay(email: str, code: str):
+    url, secret = _gmail_relay()
+    subject, html_body, text = _message(code)
+    payload = {"secret": secret, "to": email, "subject": subject, "html": html_body,
+               "text": text, "name": _sender_name()}
+    # Apps Script answers the POST with a redirect to the result page; urllib follows it with GET.
+    request = urllib.request.Request(url, data=json.dumps(payload).encode(), method="POST",
+                                     headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:
+            raw = response.read().decode(errors="replace")
+    except urllib.error.HTTPError as exc:
+        raise RuntimeError(f"Không gửi được email xác thực qua Gmail ({exc.code}).") from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError("Không kết nối được Google Apps Script gửi email.") from exc
+    try:
+        result = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("Apps Script trả về dữ liệu lạ. Kiểm tra lại quyền truy cập 'Anyone' khi deploy.") from exc
+    if not result.get("ok"):
+        raise RuntimeError(f"Gmail không gửi được email: {str(result.get('error', 'lỗi không rõ'))[:200]}")
+
+
+def _send_brevo(email: str, code: str):
+    api_key, sender = _brevo()
+    subject, html_body, text = _message(code)
     body = {
-        "sender": {"email": sender, "name": os.getenv("EXAMWATCH_MAIL_NAME", "ExamWatch").strip() or "ExamWatch"},
+        "sender": {"email": sender, "name": _sender_name()},
         "to": [{"email": email}],
-        "subject": f"Mã đăng nhập ExamWatch: {code}",
-        "htmlContent": (
-            "<div style=\"font-family:Arial,sans-serif;color:#1d2b36;max-width:420px\">"
-            "<p>Mã xác thực đăng nhập ExamWatch của bạn là:</p>"
-            f"<p style=\"font-size:32px;font-weight:700;letter-spacing:6px;color:#127986\">{html.escape(code)}</p>"
-            f"<p>Mã có hiệu lực trong {minutes} phút. Nếu bạn không đăng nhập, hãy bỏ qua email này "
-            "và đổi mật khẩu.</p></div>"),
-        "textContent": f"Mã đăng nhập ExamWatch: {code} (hiệu lực {minutes} phút).",
+        "subject": subject, "htmlContent": html_body, "textContent": text,
     }
     request = urllib.request.Request(
         BREVO_URL, data=json.dumps(body).encode(), method="POST",
