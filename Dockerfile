@@ -25,6 +25,7 @@ COPY examwatch ./examwatch
 COPY scripts ./scripts
 COPY models ./models
 COPY licenses ./licenses
+COPY web ./web
 
 RUN mkdir -p /data/models /data/evidence
 
