@@ -79,9 +79,11 @@ class Runtime:
             if self.vision_factory:
                 self.vision = self.vision_factory(self.settings)
             else:
-                if not all(v for k, v in self.model_status().items() if k != "voice"):
-                    missing = [name for name, ready in self.model_status().items()
-                               if name != "voice" and not ready]
+                # Enrollment only needs the face/pose models; the phone detector is
+                # optional here (Vision skips it when absent) and enforced in start().
+                missing = [name for name, ready in self.model_status().items()
+                           if name not in {"voice", "phone_detector"} and not ready]
+                if missing:
                     raise ValueError("Thiếu model hình ảnh: " + ", ".join(missing) + ".")
                 from .vision import Vision
                 self.vision = Vision(self.settings)
@@ -93,7 +95,20 @@ class Runtime:
                 raise ValueError("Đang có phiên thi hoạt động. Hãy kết thúc phiên hiện tại trước.")
             self._download_phone_model()
             if not self.vision_factory and not all(self.model_status().values()):
-                raise ValueError("Thiếu model. Chạy .\\prepare.ps1 trước khi bắt đầu phiên offline.")
+                missing = [name for name, ready in self.model_status().items() if not ready]
+                hint = ""
+                if "phone_detector" in missing:
+                    cloud_error = getattr(self.store.cloud, "error", None)
+                    hint = (" Upload phone_detector_v5.pt lên Firebase Storage tại "
+                            f"'{os.getenv('EXAMWATCH_PHONE_MODEL_GCS_PATH', '').strip() or 'models/phone_detector_v5.pt'}'."
+                            + (f" Lỗi: {cloud_error}" if cloud_error else ""))
+                raise ValueError("Thiếu model: " + ", ".join(missing) + "." + hint)
+            if not self.vision_factory and self.vision is not None \
+                    and getattr(self.vision, "phone_detector", True) is None \
+                    and (self.settings.models / "phone_detector_v5.pt").is_file():
+                # Vision was loaded for enrollment before the phone model arrived; reload it.
+                self.vision.close()
+                self.vision = None
             self.load_vision()
             if self.speech is None:
                 if self.speech_factory:
