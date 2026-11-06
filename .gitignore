@@ -13,6 +13,7 @@ secrets/
 models/**/*.onnx
 models/**/*.pt
 !models/phone_detector_v5.pt
+!models/phone_detector_v5.onnx
 models/**/*.task
 models/**/*.tflite
 models/**/*.bin

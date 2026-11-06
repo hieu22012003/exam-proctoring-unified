@@ -51,13 +51,21 @@ class Runtime:
                  "emotion": "emotion.onnx", "pose": "pose_lite.task",
                  "phone_detector": "phone_detector_v5.pt",
                  "voice": f"whisper-{self.settings.whisper_name}/model.bin"}
+        if not self.settings.phone_enabled:
+            paths.pop("phone_detector")
         status = {k: (self.settings.models / v).is_file() for k, v in paths.items()}
+        if self.settings.vision_url:  # served by the remote vision service
+            status["pose"] = True
+            if "phone_detector" in status:
+                status["phone_detector"] = True
         if self.settings.whisper_name in {'zipformer-vi-30m','zipformer-vi-30m-lora','zipformer-vi-30m-lora-low-lr20'}:
             status['voice'] = all((self.settings.models / self.settings.whisper_name / name).is_file()
                                   for name in ['encoder.int8.onnx','decoder.onnx','joiner.int8.onnx','tokens.txt'])
         return status
 
     def _download_phone_model(self):
+        if not self.settings.phone_enabled or self.settings.vision_url:
+            return
         phone_path = self.settings.models / "phone_detector_v5.pt"
         if phone_path.is_file():
             return
@@ -154,7 +162,8 @@ class Runtime:
         with self.lock:
             if self.session:
                 raise ValueError("Đang có phiên thi hoạt động. Hãy kết thúc phiên hiện tại trước.")
-            self._download_phone_model()
+            if self.settings.phone_enabled:
+                self._download_phone_model()
             if not self.vision_factory and not all(self.model_status().values()):
                 missing = [name for name, ready in self.model_status().items() if not ready]
                 hint = ""

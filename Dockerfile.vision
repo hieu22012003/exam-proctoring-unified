@@ -1,0 +1,28 @@
+# Render free (512 MB) vision worker: MediaPipe pose + face blendshapes + int8 ONNX
+# phone detector, no PyTorch. Serves examwatch.vision_service for the main API.
+FROM python:3.12-slim-bookworm
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    EXAMWATCH_MODELS=/opt/models \
+    EXAMWATCH_MAX_PEOPLE=3 \
+    OMP_NUM_THREADS=1 \
+    OPENBLAS_NUM_THREADS=1 \
+    MALLOC_ARENA_MAX=2
+
+WORKDIR /app
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libgl1 libglib2.0-0 libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+RUN python -m pip install --no-cache-dir numpy==1.26.4 opencv-contrib-python==4.11.0.86 mediapipe==0.10.21 \
+    onnxruntime==1.22.0 fastapi==0.115.12 uvicorn==0.34.2 "protobuf>=4.25.3,<5"
+
+RUN mkdir -p /opt/models \
+    && python -c "import urllib.request as u; b='https://storage.googleapis.com/mediapipe-models/'; u.urlretrieve(b+'pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task','/opt/models/pose_lite.task'); u.urlretrieve(b+'face_landmarker/face_landmarker/float16/1/face_landmarker.task','/opt/models/face_landmarker.task')"
+# int8, 640 px export of the custom phone detector (see models/PHONE_MODEL_SOURCE.md)
+COPY models/phone_detector_v5.onnx /opt/models/phone_detector_v5.onnx
+COPY examwatch/__init__.py examwatch/vision_service.py examwatch/onnx_detect.py ./examwatch/
+
+EXPOSE 10000
+CMD ["sh", "-c", "exec python -m uvicorn examwatch.vision_service:app --host 0.0.0.0 --port \"${PORT:-10000}\" --workers 1"]

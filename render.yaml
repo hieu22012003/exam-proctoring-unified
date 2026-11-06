@@ -1,0 +1,50 @@
+# Render Blueprint: Dashboard -> New -> Blueprint -> pick this repository.
+# Two free services (512 MB each): the main API and a vision worker it calls.
+# Values marked "sync: false" are asked for once when the Blueprint is created.
+services:
+  - type: web
+    name: examwatch-vision
+    runtime: docker
+    plan: free
+    region: singapore
+    dockerfilePath: ./Dockerfile.vision
+    healthCheckPath: /healthz
+    autoDeploy: true
+    envVars:
+      - key: EXAMWATCH_VISION_TOKEN
+        generateValue: true
+
+  - type: web
+    name: examwatch-api
+    runtime: docker
+    plan: free
+    region: singapore
+    dockerfilePath: ./Dockerfile.render
+    healthCheckPath: /healthz
+    autoDeploy: true
+    envVars:
+      - key: EXAMWATCH_VISION_TOKEN
+        fromService:
+          type: web
+          name: examwatch-vision
+          envVarKey: EXAMWATCH_VISION_TOKEN
+      - key: EXAMWATCH_VISION_URL
+        sync: false          # public URL of examwatch-vision, e.g. https://examwatch-vision.onrender.com
+      - key: EXAMWATCH_TRUSTED_HOSTS
+        value: "*.onrender.com,*.vercel.app"
+      - key: EXAMWATCH_ALLOWED_ORIGINS
+        value: "https://exam-proctoring-unified.vercel.app,https://examwatch-vn.vercel.app"
+      - key: EXAMWATCH_2FA_EMAIL
+        value: "1"
+      - key: FIREBASE_PROJECT_ID
+        value: exam-proctoring-unified
+      - key: FIREBASE_STORAGE_BUCKET
+        sync: false
+      - key: FIREBASE_WEB_API_KEY
+        sync: false
+      - key: FIREBASE_SERVICE_ACCOUNT_JSON
+        sync: false
+      - key: EXAMWATCH_MAIL_WEBHOOK_URL
+        sync: false
+      - key: EXAMWATCH_MAIL_WEBHOOK_SECRET
+        sync: false

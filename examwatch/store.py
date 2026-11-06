@@ -3,6 +3,8 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 import json
+import logging
+import os
 import sqlite3
 import unicodedata
 import uuid
@@ -80,7 +82,62 @@ class Store:
                         db.execute(f"ALTER TABLE {table} ADD COLUMN {name} {kind}")
             # A crashed application cannot resume capture without a new explicit session.
             db.execute("UPDATE sessions SET ended_at=? WHERE ended_at IS NULL", (utc_now(),))
-        self._sync_existing()
+        if not self._restore_from_cloud():
+            self._sync_existing()
+
+    def _restore_from_cloud(self):
+        """Rebuild an empty local database from the Firebase mirror.
+
+        Hosts without a persistent disk (e.g. Render free) start with an empty SQLite
+        file on every boot; candidates, sessions and reviews come back from Firestore."""
+        if self.cloud.state != "connected" or os.getenv("EXAMWATCH_RESTORE_FROM_FIREBASE", "1") != "1":
+            return False
+        with self.connection() as db:
+            if db.execute("SELECT 1 FROM students UNION ALL SELECT 1 FROM sessions LIMIT 1").fetchone():
+                return False
+        log = logging.getLogger(__name__)
+        restored = {}
+        try:
+            with self.connection() as db:
+                for collection in ("students", "sessions", "alerts", "transcripts", "observations"):
+                    columns = {r["name"]: r for r in db.execute(f"PRAGMA table_info({collection})")}
+                    count = 0
+                    for doc in self.cloud.db.collection(collection).stream():
+                        row = doc.to_dict() or {}
+                        row.setdefault("id", int(doc.id) if collection == "observations" and doc.id.isdigit() else doc.id)
+                        if collection == "students":
+                            vectors = row.get("embeddings_json") or row.get("embeddings")
+                            row["embeddings"] = vectors if isinstance(vectors, str) else json.dumps(vectors or [])
+                        for name, info in columns.items():  # fill NOT NULL columns a partial doc lacks
+                            if info["notnull"] and row.get(name) is None and info["dflt_value"] is None and name != "id":
+                                row[name] = 0 if info["type"] in {"INTEGER", "REAL"} else ""
+                        data = {k: v for k, v in row.items() if k in columns and not isinstance(v, (list, dict))}
+                        try:
+                            db.execute(f"INSERT OR REPLACE INTO {collection} ({','.join(data)}) VALUES ({','.join('?' * len(data))})",
+                                       list(data.values()))
+                            count += 1
+                        except sqlite3.Error:
+                            log.warning("Skipped %s/%s while restoring", collection, doc.id)
+                    restored[collection] = count
+                for doc in self.cloud.db.collection("settings").stream():
+                    row = doc.to_dict() or {}
+                    if "value" in row:
+                        db.execute("INSERT OR REPLACE INTO app_settings (key, value) VALUES (?, ?)",
+                                   (row.get("key", doc.id), json.dumps(row["value"])))
+                # Restored sessions cannot still be capturing on this fresh process.
+                db.execute("UPDATE sessions SET ended_at=COALESCE(ended_at, started_at) WHERE ended_at IS NULL")
+        except Exception:
+            log.exception("Restoring from Firebase failed")
+            return False
+        log.info("Restored from Firebase: %s", restored)
+        return any(restored.values())
+
+    @staticmethod
+    def _cloud_student(row):
+        # Firestore rejects nested arrays: keep the per-sample vectors as one JSON string.
+        cloud = {k: v for k, v in row.items() if k != "embeddings"}
+        cloud["embeddings_json"] = row["embeddings"] if isinstance(row["embeddings"], str) else json.dumps(row["embeddings"])
+        return cloud
 
     def _sync_existing(self):
         if self.cloud.state != "connected":
@@ -93,8 +150,7 @@ class Store:
             observations = [dict(r) for r in db.execute("SELECT * FROM observations")]
             settings = [dict(r) for r in db.execute("SELECT * FROM app_settings")]
         for row in students:
-            row["embeddings"] = json.loads(row["embeddings"])
-            self.cloud.enqueue("set", "students", row["id"], row)
+            self.cloud.enqueue("set", "students", row["id"], self._cloud_student(row))
         for collection, rows in (("sessions", sessions), ("alerts", alerts),
                                  ("transcripts", transcripts), ("observations", observations)):
             for row in rows:
@@ -142,7 +198,7 @@ class Store:
         with self.connection() as db:
             db.execute("INSERT INTO students (id,name,embeddings,created_at,role) VALUES (?,?,?,?,?)",
                        (student_id, name, json.dumps(embeddings), row["created_at"], role))
-        self.cloud.enqueue("set", "students", student_id, row)
+        self.cloud.enqueue("set", "students", student_id, self._cloud_student(row))
 
     def delete_student(self, student_id):
         with self.connection() as db:

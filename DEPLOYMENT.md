@@ -75,3 +75,19 @@ Vercel serves only the static client and proxies API requests; its rewrite featu
 ## Updates
 
 Push code changes to GitHub. Railway rebuilds the backend from the Dockerfile and Vercel rebuilds the static client from `main`. When the Railway domain changes, rerun `scripts/configure_vercel.py` and update both `EXAMWATCH_ALLOWED_ORIGINS` and `EXAMWATCH_TRUSTED_HOSTS`.
+
+
+## Render free (two services)
+
+A single 512 MB free instance cannot hold every model, so `render.yaml` defines two free services:
+
+| Service | Dockerfile | Holds | Measured peak |
+|---|---|---|---|
+| `examwatch-api` | `Dockerfile.render` | API, login/2FA, data, face detection + recognition, emotions, speech | ~400 MB |
+| `examwatch-vision` | `Dockerfile.vision` | MediaPipe pose, face blendshapes, int8 ONNX phone detector (`models/phone_detector_v5.onnx`, 640 px) | ~400 MB + blendshapes |
+
+No PyTorch is installed on either. The API sends each frame to the vision service (`EXAMWATCH_VISION_URL`, shared `EXAMWATCH_VISION_TOKEN`); if it is unreachable, faces, attendance and emotions keep working without poses. Lite mode (`EXAMWATCH_LITE=1`) tracks up to 3 people.
+
+Free services have no disk: on every start the API rebuilds its database from Firestore (`EXAMWATCH_RESTORE_FROM_FIREBASE=1`, default). Evidence images/videos are not restored unless Firebase Storage is enabled. Free services sleep after 15 minutes without traffic (about a minute to wake), have 0.1 CPU, and share 750 instance hours per month per workspace.
+
+Deploy: Render Dashboard -> New -> Blueprint -> this repository; enter the secrets; after `examwatch-vision` is live, set `EXAMWATCH_VISION_URL` on `examwatch-api` to its public URL. Then point `vercel.json` at the API's `onrender.com` URL (`python scripts/configure_vercel.py https://examwatch-api.onrender.com`).

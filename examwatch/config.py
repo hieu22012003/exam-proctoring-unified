@@ -33,6 +33,10 @@ class Settings:
     proctor_dwell_seconds: float = 60.0
     pose_engine: str = "auto"         # auto: YOLO pose for more than 3 people, else MediaPipe
     yolo_imgsz: int = 800
+    vision_url: str = ""              # remote examwatch.vision_service (pose, blendshapes, phones)
+    vision_token: str = ""
+    lite: bool = False                # small hosts (e.g. 512 MB): no PyTorch models, up to 3 people
+    phone_enabled: bool = True
     phone_interval: float = 0.5       # seconds between phone-detector passes (boxes reused in between)
     speak_threshold: float = 2.5      # mean mouth-motion needed to attribute speech to a person
     identity_budget: int = 4          # face embeddings per frame when many people are visible
@@ -41,15 +45,20 @@ class Settings:
 
     @classmethod
     def load(cls):
+        LITE = os.getenv("EXAMWATCH_LITE", "").strip() == "1"
         return cls(
             data=Path(os.getenv("EXAMWATCH_DATA", str(ROOT / "data"))).resolve(),
             models=Path(os.getenv("EXAMWATCH_MODELS", str(ROOT / "models"))).resolve(),
             threads=max(1, min(8, int(os.getenv("EXAMWATCH_THREADS", "2")))),
             whisper_name=os.getenv("EXAMWATCH_WHISPER", "zipformer-vi-30m"),
-            max_people=max(1, min(40, int(os.getenv("EXAMWATCH_MAX_PEOPLE", "25")))),
-            frame_width=max(640, min(1920, int(os.getenv("EXAMWATCH_FRAME_WIDTH", "1280")))),
-            detector_width=max(320, min(1920, int(os.getenv("EXAMWATCH_DETECTOR_WIDTH", "960")))),
-            pose_engine=os.getenv("EXAMWATCH_POSE_ENGINE", "auto").strip().lower(),
+            lite=LITE,
+            vision_url=os.getenv("EXAMWATCH_VISION_URL", "").strip(),
+            vision_token=os.getenv("EXAMWATCH_VISION_TOKEN", "").strip(),
+            phone_enabled=os.getenv("EXAMWATCH_PHONE", "0" if LITE else "1").strip() == "1",
+            max_people=max(1, min(40, int(os.getenv("EXAMWATCH_MAX_PEOPLE", "3" if LITE else "25")))),
+            frame_width=max(640, min(1920, int(os.getenv("EXAMWATCH_FRAME_WIDTH", "960" if LITE else "1280")))),
+            detector_width=max(320, min(1920, int(os.getenv("EXAMWATCH_DETECTOR_WIDTH", "640" if LITE else "960")))),
+            pose_engine=os.getenv("EXAMWATCH_POSE_ENGINE", "mediapipe" if LITE else "auto").strip().lower(),
             yolo_imgsz=max(320, min(1280, int(os.getenv("EXAMWATCH_POSE_IMGSZ", "800")))),
             phone_interval=max(0.0, min(5.0, float(os.getenv("EXAMWATCH_PHONE_INTERVAL", "0.5")))),
         )

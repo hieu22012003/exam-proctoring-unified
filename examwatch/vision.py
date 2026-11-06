@@ -91,7 +91,17 @@ def mouth_points(face, width, height):
 class Vision:
     def __init__(self, settings):
         import onnxruntime as ort
-        import mediapipe as mp
+        self.remote = None
+        if settings.vision_url:
+            # Pose, blendshapes and phones run on examwatch.vision_service; MediaPipe is
+            # never imported here, which keeps this process small.
+            from .remote_vision import RemoteVision
+            self.remote = RemoteVision(settings.vision_url, settings.vision_token, width=settings.frame_width)
+            self.remote_worker = ThreadPoolExecutor(max_workers=1, thread_name_prefix='examwatch-remote')
+            self.mesh_at = -1e9
+            mp = None
+        else:
+            import mediapipe as mp
         self.settings, self.mp = settings, mp
         cv2.setNumThreads(settings.threads)
         root = settings.models
@@ -111,12 +121,12 @@ class Vision:
         # This adapter intentionally accepts the DeepFace NHWC grayscale model only.
         if self.emotion_input.shape[-3:] != [48, 48, 1]:
             raise ValueError(f"Emotion ONNX shape không phù hợp: {self.emotion_input.shape}")
-        self.pose = self.make_pose(1)
+        self.pose = self.make_pose(1) if self.remote is None else None
         self.multi_pose = None
         self.yolo_pose = None
         engine = settings.pose_engine if settings.pose_engine in {"yolo", "mediapipe"} else (
             "yolo" if settings.max_people > 3 else "mediapipe")
-        if engine == "yolo":
+        if engine == "yolo" and self.remote is None:
             # One pass returns every person's body: needed for a full classroom.
             try:
                 from ultralytics import YOLO
@@ -133,7 +143,7 @@ class Vision:
         self.tracker = Tracker(settings)
         self.face_mesh = None
         mesh_path = root / "face_landmarker.task"
-        if mesh_path.is_file():
+        if mesh_path.is_file() and self.remote is None:
             try:  # eye closure / yawning for the "tired" state; optional
                 self.face_mesh = mp.tasks.vision.FaceLandmarker.create_from_options(
                     mp.tasks.vision.FaceLandmarkerOptions(
@@ -148,7 +158,7 @@ class Vision:
         self.phone_boxes, self.phone_at = [], -1e9
         self.phone_detector = None
         phone_path = root / "phone_detector_v5.pt"
-        if phone_path.is_file():
+        if settings.phone_enabled and phone_path.is_file() and self.remote is None:
             try:
                 from ultralytics import YOLO
                 self.phone_detector = YOLO(str(phone_path))
@@ -174,9 +184,13 @@ class Vision:
             self.face_worker.shutdown(wait=True)
         if hasattr(self, 'phone_worker'):
             self.phone_worker.shutdown(wait=True)
+        if getattr(self, 'remote', None) is not None:
+            self.remote_worker.shutdown(wait=True)
+            self.remote.close()
         if getattr(self, 'face_mesh', None) is not None:
             self.face_mesh.close()
-        self.pose.close()
+        if getattr(self, 'pose', None) is not None:
+            self.pose.close()
         if getattr(self, 'multi_pose', None) is not None:
             self.multi_pose.close()
 
@@ -264,6 +278,13 @@ class Vision:
             phone_job = worker.submit(self.detect_phones, frame) if worker else None
             if worker is None:
                 self.phone_boxes, self.phone_at = self.detect_phones(frame), now
+        remote_job = None
+        if getattr(self, 'remote', None) is not None:
+            want_phone = self.settings.phone_enabled and now - getattr(self, 'phone_at', -1e9) >= self.settings.phone_interval
+            want_mesh = now - self.mesh_at >= 1.0
+            remote_job = self.remote_worker.submit(self.remote.analyze, frame, want_phone, want_mesh, self.settings.phone_confidence)
+            if want_mesh:
+                self.mesh_at = now
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         # DNN detection and pose consume the same immutable frame concurrently.
         face_job = self.face_worker.submit(self.faces, frame) if hasattr(self,'face_worker') else None
@@ -277,7 +298,14 @@ class Vision:
             need_pose = bool(len(all_faces))
         image = None
         used_multi = False
-        if need_pose and getattr(self, 'yolo_pose', None) is not None:
+        remote = None
+        if remote_job is not None:
+            remote = remote_job.result() or {}
+            poses = remote.get("poses") or []
+            used_multi = True
+            if remote.get("phones") is not None:
+                self.phone_boxes, self.phone_at = [tuple(p) for p in remote["phones"]], now
+        elif need_pose and getattr(self, 'yolo_pose', None) is not None:
             result = self.yolo_pose.predict(frame, imgsz=self.settings.yolo_imgsz, conf=0.3, verbose=False,
                                             max_det=self.settings.max_people + 5)[0]
             keypoints = getattr(result, 'keypoints', None)
@@ -306,7 +334,7 @@ class Vision:
         faces = all_faces[:self.settings.max_people]
         # A newly entered second/third person gets multi-person inference on
         # this frame, rather than waiting for the next detection cycle.
-        if len(faces)>1 and not used_multi and image is not None and getattr(self, 'yolo_pose', None) is None:
+        if len(faces)>1 and not used_multi and image is not None and getattr(self, 'yolo_pose', None) is None and remote is None:
             if getattr(self,'multi_pose',None) is None:
                 self.multi_pose = self.make_pose(self.settings.max_people)
             result = self.multi_pose.detect_for_video(image,timestamp)
@@ -356,7 +384,12 @@ class Vision:
                 track.identity_score, track.identity_at = score, now
                 if new_id and track.baseline:
                     track.baseline_owner = new_id
-            if id(track) in emotion_due and getattr(self, 'face_mesh', None) is not None:
+            if remote and remote.get("faces"):
+                fx, fy = (float(face[0]) + float(face[2]) / 2) / w, (float(face[1]) + float(face[3]) / 2) / h
+                near = min(remote["faces"], key=lambda m: (m["cx"] - fx) ** 2 + (m["cy"] - fy) ** 2)
+                if abs(near["cx"] - fx) < float(face[2]) / w and abs(near["cy"] - fy) < float(face[3]) / h:
+                    update_drowsiness(track, self.remote.blendshapes(near), now)
+            elif id(track) in emotion_due and getattr(self, 'face_mesh', None) is not None:
                 try:
                     shapes = self.blendshapes(frame, face)
                     if shapes:

@@ -1,0 +1,40 @@
+# Render (free 512 MB / 0.1 CPU) main API: no PyTorch, models baked in at build time
+# because free services have no persistent disk. Pose, eye closure and phones come
+# from the separate examwatch-vision service (Dockerfile.vision) via EXAMWATCH_VISION_URL.
+FROM python:3.12-slim-bookworm
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    EXAMWATCH_LITE=1 \
+    EXAMWATCH_PHONE=1 \
+    EXAMWATCH_PHONE_INTERVAL=2 \
+    EXAMWATCH_DATA=/tmp/examwatch \
+    EXAMWATCH_MODELS=/opt/models \
+    EXAMWATCH_WHISPER=zipformer-vi-30m \
+    EXAMWATCH_THREADS=1 \
+    EXAMWATCH_COOKIE_SECURE=1 \
+    OMP_NUM_THREADS=1 \
+    OPENBLAS_NUM_THREADS=1 \
+    MALLOC_ARENA_MAX=2
+
+WORKDIR /app
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ffmpeg libgl1 libglib2.0-0 libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements-base.txt ./requirements-base.txt
+RUN python -m pip install --no-cache-dir -r requirements-base.txt
+
+COPY examwatch ./examwatch
+COPY scripts ./scripts
+COPY licenses ./licenses
+COPY web ./web
+
+# Download and verify every public model once, into the image.
+RUN mkdir -p /opt/models /tmp/examwatch/evidence \
+    && python scripts/prepare_models.py --whisper "$EXAMWATCH_WHISPER"
+
+EXPOSE 10000
+CMD ["sh", "-c", "mkdir -p \"$EXAMWATCH_DATA/evidence\" && exec python -m uvicorn examwatch.main:create_app --factory --host 0.0.0.0 --port \"${PORT:-10000}\" --workers 1 --proxy-headers"]
