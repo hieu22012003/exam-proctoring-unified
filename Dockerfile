@@ -27,8 +27,7 @@ COPY models ./models
 COPY licenses ./licenses
 COPY web ./web
 
-RUN mkdir -p /data/models /data/evidence
-
+RUN mkdir -p /data/models /data/evidence /app/web
 EXPOSE 8000
 
 CMD ["sh", "-c", "python scripts/prepare_models.py --whisper \"$EXAMWATCH_WHISPER\" && exec python -m uvicorn examwatch.main:create_app --factory --host 0.0.0.0 --port \"${PORT:-8000}\" --workers 1 --proxy-headers"]
