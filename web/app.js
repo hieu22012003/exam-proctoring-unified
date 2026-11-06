@@ -19,7 +19,7 @@ let selectedAngle = 'front';
 let audioContext = null, audioStream = null, audioNode = null, audioSource = null;
 let audioChain = Promise.resolve(), flushDone = null, viewing = null, lastRecords = null;
 let noticeTimeout, lastError = '', currentPage = 'overview';
-let micSampleUrl = null;
+let micSampleUrl = null, historyKey = '';
 let standingThreshold = 5, standingSettingsDirty = false;
 let cameraResultAt = null, cameraAnalysisFps = 0;
 const frameCanvas = document.createElement('canvas');
@@ -405,7 +405,12 @@ async function loadSessionData(id) {
     if(data.alerts.length)$('alerts').innerHTML=data.alerts.map(alertHTML).join('');
     if(data.transcripts.length)$('transcripts').innerHTML=[...data.transcripts].reverse().map(transcriptHTML).join('');
   }
-  if(viewing===id) renderHistory(data);
+  if(viewing===id) {
+    // Redraw only when the record changed: a 2 s poll must not reset the emotion
+    // chart selection, scroll position or an audio clip that is playing.
+    const key=JSON.stringify([id,data.session.ended_at,data.alerts.map(a=>[a.id,a.acknowledged,a.decision,a.evidence_status]),data.transcripts.length,data.attendance?.present]);
+    if(key!==historyKey||!$('history-detail').querySelector('.history-content')){historyKey=key;renderHistory(data);}
+  }
   lastRecords=data;
   if(viewing===id) window.examwatchHistoryRendered?.(data);
   return data;
