@@ -37,6 +37,13 @@ Create a service from this GitHub repository. Railway detects the root `Dockerfi
 | `EXAMWATCH_MAIL_FROM` | With Brevo: sender address verified in Brevo (Senders & IP → Senders) |
 | `EXAMWATCH_MAIL_NAME` | Optional sender name, default `ExamWatch` |
 
+| `EXAMWATCH_MAX_PEOPLE` | Optional, default `25`: people tracked per frame |
+| `EXAMWATCH_POSE_ENGINE` | Optional, default `auto` (YOLO pose when more than 3 people, else MediaPipe); `yolo` or `mediapipe` to force |
+| `EXAMWATCH_POSE_IMGSZ` | Optional, default `800`: YOLO pose input size; lower (640) is faster, higher sees farther rows |
+| `EXAMWATCH_FRAME_WIDTH` / `EXAMWATCH_DETECTOR_WIDTH` | Optional, defaults `1280` / `960`: camera frame and face-detector width for a full classroom |
+
+Classroom scale: with 25 people the backend runs one YOLO pose pass for every body and refreshes at most 4 face identities and 6 emotions per frame (round robin), so a 2 vCPU service analyses roughly 1–2 frames per second. Register proctors on the Students page with the role "Giám thị" so they are excluded from alerts and attendance and reminded after standing beside one desk longer than the configured time.
+
 Google sign-in: enable the Google provider in Firebase Authentication → Sign-in method, and add every Vercel domain the app is served from to Authentication → Settings → Authorized domains.
 
 Set the Railway healthcheck path to `/healthz`; leave the service on one replica. The container prepares the public face, pose, and speech models into `/data/models` during startup. It listens on Railway's injected `PORT`.

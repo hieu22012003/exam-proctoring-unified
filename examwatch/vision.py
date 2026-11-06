@@ -7,6 +7,27 @@ from .rules import posture_signal, classify_posture
 from .tracking import Tracker, identify
 
 EMOTIONS = ["angry", "disgust", "fear", "happy", "sad", "surprise", "neutral"]
+# COCO-17 keypoints (YOLO pose) -> MediaPipe-33 indices used by the posture rules.
+COCO_TO_MP = {0: (0,), 1: (1, 2, 3), 2: (4, 5, 6), 3: (7,), 4: (8,), 5: (11,), 6: (12,), 7: (13,), 8: (14,),
+              9: (15,), 10: (16,), 11: (23,), 12: (24,), 13: (25,), 14: (26,), 15: (27,), 16: (28,)}
+
+
+def coco_to_mediapipe(keypoints, width, height):
+    """One YOLO person (17 x [x, y, conf] in pixels) as 33 normalized [x, y, z, visibility]."""
+    out = [[0.0, 0.0, 0.0, 0.0] for _ in range(33)]
+    for coco, targets in COCO_TO_MP.items():
+        x, y, conf = (float(v) for v in keypoints[coco][:3])
+        for t in targets:
+            out[t] = [x / width, y / height, 0.0, conf]
+    return out
+
+
+def due(tracks, stamp, interval, now, budget):
+    """Tracks whose identity/emotion refresh is due, oldest first, capped per frame."""
+    ready = [t for t in tracks if now - getattr(t, stamp) >= interval]
+    if budget and len(tracks) > 3:
+        ready = sorted(ready, key=lambda t: getattr(t, stamp))[:budget]
+    return {id(t) for t in ready}
 
 
 def mouth_points(face, width, height):
@@ -44,6 +65,19 @@ class Vision:
             raise ValueError(f"Emotion ONNX shape không phù hợp: {self.emotion_input.shape}")
         self.pose = self.make_pose(1)
         self.multi_pose = None
+        self.yolo_pose = None
+        engine = settings.pose_engine if settings.pose_engine in {"yolo", "mediapipe"} else (
+            "yolo" if settings.max_people > 3 else "mediapipe")
+        if engine == "yolo":
+            # One pass returns every person's body: needed for a full classroom.
+            try:
+                from ultralytics import YOLO
+                path = root / "yolo11n-pose.pt"
+                self.yolo_pose = YOLO(str(path) if path.is_file() else "yolo11n-pose.pt")
+            except Exception:
+                import logging
+                logging.getLogger(__name__).exception("YOLO pose unavailable; falling back to MediaPipe")
+                self.yolo_pose = None
         self.face_worker = ThreadPoolExecutor(max_workers=1, thread_name_prefix='examwatch-face')
         self.previous_face_count = 0
         self.multi_until = 0
@@ -144,7 +178,16 @@ class Vision:
             need_pose = bool(len(all_faces))
         image = None
         used_multi = False
-        if need_pose:
+        if need_pose and getattr(self, 'yolo_pose', None) is not None:
+            result = self.yolo_pose.predict(frame, imgsz=self.settings.yolo_imgsz, conf=0.3, verbose=False,
+                                            max_det=self.settings.max_people + 5)[0]
+            keypoints = getattr(result, 'keypoints', None)
+            data = getattr(keypoints, 'data', None) if keypoints is not None else None
+            if data is not None and len(data):
+                data = data.cpu().numpy() if hasattr(data, 'cpu') else np.asarray(data)
+                poses = [coco_to_mediapipe(person, w, h) for person in data]
+            used_multi = True
+        elif need_pose:
             scale = min(1.0, self.settings.pose_width / w)
             pose_frame = cv2.resize(frame, (round(w * scale), round(h * scale)))
             image = self.mp.Image(image_format=self.mp.ImageFormat.SRGB,
@@ -164,7 +207,7 @@ class Vision:
         faces = all_faces[:self.settings.max_people]
         # A newly entered second/third person gets multi-person inference on
         # this frame, rather than waiting for the next detection cycle.
-        if len(faces)>1 and not used_multi and image is not None:
+        if len(faces)>1 and not used_multi and image is not None and getattr(self, 'yolo_pose', None) is None:
             if getattr(self,'multi_pose',None) is None:
                 self.multi_pose = self.make_pose(self.settings.max_people)
             result = self.multi_pose.detect_for_video(image,timestamp)
@@ -175,6 +218,8 @@ class Vision:
         boxes = [[float(f[0]/w),float(f[1]/h),float(f[2]/w),float(f[3]/h)] for f in faces]
         tracks = self.tracker.update(boxes, now)
         assigned_poses = set()
+        identity_due = due(tracks, 'identity_at', self.settings.identity_interval, now, self.settings.identity_budget)
+        emotion_due = due(tracks, 'emotion_at', self.settings.emotion_interval, now, self.settings.emotion_budget)
         for track, face in zip(tracks, faces):
             eye_mid = (float(face[4]) + float(face[6])) / 2
             eye_span = max(1.0, abs(float(face[4]) - float(face[6])))
@@ -193,7 +238,7 @@ class Vision:
                                       and now - track.head_suspicion_since >= 1.25
                                       and track.head_suspicion_samples >= 3)
             track.mouth_points=mouth_points(face,w,h)
-            if now - track.identity_at >= self.settings.identity_interval:
+            if id(track) in identity_due:
                 person, score = identify(self.embedding(frame, face) if gallery else None, gallery,
                                          self.settings.face_threshold, self.settings.identity_margin)
                 new_id = person["id"] if person else None
@@ -211,7 +256,7 @@ class Vision:
                 track.identity_score, track.identity_at = score, now
                 if new_id and track.baseline:
                     track.baseline_owner = new_id
-            if now - track.emotion_at >= self.settings.emotion_interval:
+            if id(track) in emotion_due:
                 probabilities = self.predict_emotion(frame, face)
                 if probabilities is not None:
                     track.probabilities = (probabilities if track.probabilities is None else

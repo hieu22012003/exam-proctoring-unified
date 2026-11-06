@@ -32,6 +32,7 @@ class Settings:
     evidence_audio: bool = True
     proctor_dwell_seconds: float = 60.0
     pose_engine: str = "auto"         # auto: YOLO pose for more than 3 people, else MediaPipe
+    yolo_imgsz: int = 800
     identity_budget: int = 4          # face embeddings per frame when many people are visible
     emotion_budget: int = 6
     whisper_name: str = "zipformer-vi-30m"
@@ -47,4 +48,5 @@ class Settings:
             frame_width=max(640, min(1920, int(os.getenv("EXAMWATCH_FRAME_WIDTH", "1280")))),
             detector_width=max(320, min(1920, int(os.getenv("EXAMWATCH_DETECTOR_WIDTH", "960")))),
             pose_engine=os.getenv("EXAMWATCH_POSE_ENGINE", "auto").strip().lower(),
+            yolo_imgsz=max(320, min(1280, int(os.getenv("EXAMWATCH_POSE_IMGSZ", "800")))),
         )
