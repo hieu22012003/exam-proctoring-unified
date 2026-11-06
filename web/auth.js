@@ -13,7 +13,7 @@
   const otpSubmit = document.getElementById('otp-submit');
   const otpResend = document.getElementById('otp-resend');
   const FIREBASE_SDK = 'https://www.gstatic.com/firebasejs/10.14.1/';
-  let config = null, registering = false, firebaseReady = null;
+  let config = null, registering = false, firebaseReady = null, loadedAuth = null;
 
   const showMessage = (text, error = false) => { message.textContent = text; message.classList.toggle('error', error); };
   const showOtpMessage = (text, error = false) => { otpMessage.textContent = text; otpMessage.classList.toggle('error', error); };
@@ -67,6 +67,7 @@
       const app = window.firebase.initializeApp({apiKey: config.api_key, authDomain: `${config.project_id}.firebaseapp.com`, projectId: config.project_id});
       const auth = app.auth();
       await auth.setPersistence(window.firebase.auth.Auth.Persistence.NONE);
+      loadedAuth = auth;
       return auth;
     })();
     firebaseReady.catch(() => { firebaseReady = null; });
@@ -110,12 +111,23 @@
   google.addEventListener('click', async () => {
     if (!config?.enabled) { showMessage('Firebase chưa được cấu hình.', true); return; }
     busy(true); showMessage('Đang mở cửa sổ đăng nhập Google…');
-    let auth = null;
-    try {
-      auth = await firebaseAuth();
+    // Browsers only allow a popup opened straight from the click. When the SDK is already
+    // loaded, open it synchronously here; awaiting anything first gets it blocked.
+    let auth = loadedAuth;
+    const popup = (instance) => {
       const provider = new window.firebase.auth.GoogleAuthProvider();
       provider.setCustomParameters({prompt: 'select_account'});
-      const credential = await auth.signInWithPopup(provider);
+      return instance.signInWithPopup(provider);
+    };
+    const pending = auth ? popup(auth) : null;
+    try {
+      if (!auth) {
+        auth = await firebaseAuth();
+        // The SDK was still loading, so this click can no longer open a popup reliably.
+        showMessage('Đã sẵn sàng. Bấm "Tiếp tục với Google" thêm một lần nữa.');
+        return;
+      }
+      const credential = await pending;
       if (config.two_factor) showMessage('Đang gửi mã xác thực tới email…');
       await completeSession(await credential.user.getIdToken());
     } catch (error) {
