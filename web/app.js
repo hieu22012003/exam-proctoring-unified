@@ -385,7 +385,7 @@ $('student-list').addEventListener('click',async(e)=>{
 function alertHTML(a) {
   const eventNames=window.examwatchEventNames;
   const video=a.evidence_type==='video';
-  const evidence=a.evidence_type==='none' ? '<span class="tag">Không lưu bằng chứng</span>' : video
+  const evidence=a.evidence_type==='none' ? '<span class="tag">Không lưu bằng chứng</span>' : a.evidence_status==='missing' ? '<span class="tag" title="Máy chủ đã khởi động lại không có ổ lưu trữ">Bằng chứng không còn trên máy chủ</span>' : video
     ? a.evidence_status==='ready'
       ? `<button class="button secondary" data-video="${a.id}" data-caption="${esc(a.student_name+' · '+timestamp(a.created_at))}">Xem video ↗</button>`
       : `<span class="tag">${a.evidence_status==='failed'?'Không tạo được video':'Đang hoàn tất video…'}</span>`

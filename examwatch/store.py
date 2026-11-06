@@ -28,6 +28,14 @@ def fold(text):
     return "".join(c for c in text if unicodedata.category(c) != "Mn")
 
 
+def _age_seconds(stamp):
+    from datetime import datetime, timezone
+    try:
+        return (datetime.now(timezone.utc) - datetime.fromisoformat(str(stamp).replace("Z", "+00:00"))).total_seconds()
+    except ValueError:
+        return 0
+
+
 def mood_of(emotion, tired=False):
     """Group the 7 model emotions into the 4 support states shown to proctors."""
     if tired:
@@ -273,7 +281,8 @@ class Store:
         path = self.directory / 'evidence' / row['image']
         row['evidence_type'] = 'video' if path.suffix == '.webm' else 'image'
         row['evidence_status'] = ('ready' if path.is_file() else
-            'failed' if path.with_suffix('.failed').is_file() else 'pending')
+            'failed' if path.with_suffix('.failed').is_file() else
+            'missing' if _age_seconds(row.get('created_at')) > 180 else 'pending')
         row['has_thumbnail'] = bool(row.get('thumbnail') and (self.directory / 'evidence' / row['thumbnail']).is_file()) \
             or (row['evidence_type'] == 'image' and row['evidence_status'] == 'ready')
         row['decision_label'] = DECISIONS.get(row.get('decision') or '', '')

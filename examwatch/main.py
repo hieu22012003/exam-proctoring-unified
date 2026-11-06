@@ -397,9 +397,9 @@ def create_app(settings=None, runtime=None, otp_store=None):
                 raise ValueError("Chữ ký không hợp lệ.") from exc
             if not png.startswith(b"\x89PNG"):
                 raise ValueError("Chữ ký không hợp lệ.")
-            import uuid
-            signature = uuid.uuid4().hex + ".png"
-            (settings.data / "evidence" / signature).write_bytes(png)
+            # Kept in the record itself so it syncs to Firestore and survives a host
+            # without a persistent disk (a file in evidence/ would be lost on restart).
+            signature = body.signature
         account = getattr(request.state, "user", {}) or {}
         reviewer = body.reviewer.strip()
         if account.get("email") and account["email"] not in reviewer:
@@ -423,7 +423,10 @@ def create_app(settings=None, runtime=None, otp_store=None):
 
     @app.get("/api/alerts/{alert_id}/signature")
     def signature(alert_id: str):
-        return evidence_response((runtime.store.alert(alert_id) or {}).get("signature"), "image/png")
+        value = (runtime.store.alert(alert_id) or {}).get("signature") or ""
+        if value.startswith("data:image/png;base64,"):
+            return Response(base64.b64decode(value.split(",", 1)[1]), media_type="image/png")
+        return evidence_response(value or None, "image/png")  # older rows: a file name
 
     @app.get("/api/transcripts")
     def transcripts(q: str = "", session_id: str = "", speaker: str = "", limit: int = Query(500, ge=1, le=5000)):

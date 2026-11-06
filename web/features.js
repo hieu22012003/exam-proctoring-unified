@@ -76,6 +76,7 @@
     reviewing = a;
     const ev = a.evidence_type === 'video' && a.evidence_status === 'ready'
       ? `<video controls playsinline src="/api/alerts/${a.id}/video"></video>`
+      : a.evidence_status === 'missing' ? '<div class="empty compact">Bằng chứng không còn trên máy chủ (máy chủ đã khởi động lại). Biên bản và quyết định vẫn được lưu.</div>'
       : a.evidence_type === 'image' ? `<img src="/api/alerts/${a.id}/image" alt="Ảnh bằng chứng">`
       : a.has_thumbnail ? `<img src="/api/alerts/${a.id}/thumb" alt="Ảnh bằng chứng"><p class="hint">Video đang hoàn tất…</p>`
       : '<div class="empty compact">Không lưu bằng chứng cho sự cố này (theo cấu hình).</div>';

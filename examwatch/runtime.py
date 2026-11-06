@@ -55,9 +55,11 @@ class Runtime:
             paths.pop("phone_detector")
         status = {k: (self.settings.models / v).is_file() for k, v in paths.items()}
         if self.settings.vision_url:  # served by the remote vision service
-            status["pose"] = True
+            remote = getattr(self.vision, "remote", None) if self.vision else None
+            reachable = remote is None or remote.error is None
+            status["pose"] = reachable
             if "phone_detector" in status:
-                status["phone_detector"] = True
+                status["phone_detector"] = reachable
         if self.settings.whisper_name in {'zipformer-vi-30m','zipformer-vi-30m-lora','zipformer-vi-30m-lora-low-lr20'}:
             status['voice'] = all((self.settings.models / self.settings.whisper_name / name).is_file()
                                   for name in ['encoder.int8.onnx','decoder.onnx','joiner.int8.onnx','tokens.txt'])
