@@ -15,6 +15,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from .config import Settings, ROOT
 from .runtime import Runtime
 from .auth import firebase_admin_app, auth_configuration
+from .otp import OtpStore, PENDING_COOKIE, CODE_TTL_SECONDS, two_factor_enabled, mail_configured, mask_email
 
 
 class StartSession(BaseModel):
@@ -46,6 +47,10 @@ class FirebaseToken(BaseModel):
     id_token: str = Field(min_length=20, max_length=10000)
 
 
+class OtpCode(BaseModel):
+    code: str = Field(min_length=6, max_length=6, pattern=r"^\d{6}$")
+
+
 def decode_frame(data, width):
     if len(data) > 1_500_000:
         raise ValueError("Ảnh vượt quá 1.5 MB.")
@@ -60,9 +65,11 @@ def decode_frame(data, width):
     return frame
 
 
-def create_app(settings=None, runtime=None):
+def create_app(settings=None, runtime=None, otp_store=None):
     settings = settings or Settings.load()
     runtime = runtime or Runtime(settings)
+    otp_store = otp_store or OtpStore()
+    secure_cookie = lambda: os.getenv("EXAMWATCH_COOKIE_SECURE", "") == "1"
 
     @asynccontextmanager
     async def lifespan(app):
@@ -79,7 +86,8 @@ def create_app(settings=None, runtime=None):
     @app.middleware("http")
     async def require_firebase_session(request: Request, call_next):
         path = request.url.path
-        public = {"/api/auth/config", "/api/auth/session", "/api/auth/demo-session", "/api/auth/logout"}
+        public = {"/api/auth/config", "/api/auth/session", "/api/auth/demo-session", "/api/auth/logout",
+                  "/api/auth/otp/verify", "/api/auth/otp/resend"}
         if path.startswith("/api/") and path not in public:
             cookie = request.cookies.get("examwatch_session")
             if not cookie:
@@ -142,7 +150,17 @@ def create_app(settings=None, runtime=None):
 
     @app.get("/api/auth/config")
     def auth_config():
-        return auth_configuration()
+        config = auth_configuration()
+        config["two_factor"] = two_factor_enabled() and not config.get("demo")
+        return config
+
+    def set_session_cookie(response: Response, session_cookie: str):
+        response.set_cookie("examwatch_session", session_cookie, max_age=8 * 60 * 60,
+                            httponly=True, secure=secure_cookie(), samesite="strict", path="/")
+
+    def clear_pending_cookie(response: Response):
+        response.delete_cookie(PENDING_COOKIE, path="/api/auth/otp", httponly=True,
+                               secure=secure_cookie(), samesite="strict")
 
     @app.post("/api/auth/demo-session")
     def create_demo_session(response: Response):
@@ -161,14 +179,51 @@ def create_app(settings=None, runtime=None):
         if not firebase_app or not auth_configuration()["enabled"]:
             raise HTTPException(503, "Firebase Authentication chưa được cấu hình.")
         try:
-            auth.verify_id_token(body.id_token, app=firebase_app, check_revoked=True)
+            claims = auth.verify_id_token(body.id_token, app=firebase_app, check_revoked=True)
             session_cookie = auth.create_session_cookie(body.id_token, expires_in=timedelta(hours=8), app=firebase_app)
         except Exception as exc:
             raise HTTPException(401, "Không xác thực được tài khoản Firebase.") from exc
-        response.set_cookie("examwatch_session", session_cookie, max_age=8 * 60 * 60,
-                            httponly=True, secure=os.getenv("EXAMWATCH_COOKIE_SECURE", "") == "1",
-                            samesite="strict", path="/")
+        if not two_factor_enabled():
+            set_session_cookie(response, session_cookie)
+            return {"ok": True}
+        email = (claims.get("email") or "").strip()
+        if not email:
+            raise HTTPException(400, "Tài khoản không có email để nhận mã xác thực.")
+        if not mail_configured():
+            raise HTTPException(503, "Xác thực 2 lớp đã bật nhưng chưa cấu hình dịch vụ gửi email.")
+        try:
+            token = otp_store.start(claims.get("uid", ""), email, session_cookie)
+        except RuntimeError as exc:
+            raise HTTPException(502, str(exc)) from exc
+        response.delete_cookie("examwatch_session", path="/")
+        response.set_cookie(PENDING_COOKIE, token, max_age=CODE_TTL_SECONDS, httponly=True,
+                            secure=secure_cookie(), samesite="strict", path="/api/auth/otp")
+        return {"ok": True, "otp_required": True, "email": mask_email(email)}
+
+    @app.post("/api/auth/otp/verify")
+    def verify_otp(body: OtpCode, request: Request, response: Response):
+        token = request.cookies.get(PENDING_COOKIE)
+        try:
+            session_cookie = otp_store.verify(token, body.code)
+        except PermissionError as exc:
+            failed = JSONResponse({"detail": str(exc), "restart": True}, status_code=401)
+            clear_pending_cookie(failed)
+            return failed
+        set_session_cookie(response, session_cookie)
+        clear_pending_cookie(response)
         return {"ok": True}
+
+    @app.post("/api/auth/otp/resend")
+    def resend_otp(request: Request):
+        try:
+            item = otp_store.resend(request.cookies.get(PENDING_COOKIE))
+        except PermissionError as exc:
+            failed = JSONResponse({"detail": str(exc), "restart": True}, status_code=401)
+            clear_pending_cookie(failed)
+            return failed
+        except RuntimeError as exc:
+            raise HTTPException(502, str(exc)) from exc
+        return {"ok": True, "email": mask_email(item.email)}
 
     @app.get("/api/auth/me")
     def auth_me(request: Request):

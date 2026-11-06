@@ -17,6 +17,13 @@
 .auth-toggle{display:block;margin:17px auto 0;padding:5px;border:0;background:none;color:#416a50;font:inherit;cursor:pointer}
 .auth-message{min-height:20px;margin:10px 0!important;color:#416a50;font-size:13px}
 .auth-message.error{color:#b84945}.auth-card button:disabled{opacity:.55;cursor:wait}
+.auth-card[hidden],.auth-divider[hidden],.google-button[hidden]{display:none}
+.auth-divider{display:flex;align-items:center;gap:12px;margin:18px 0 10px;color:#8a979f;font-size:12px}
+.auth-divider::before,.auth-divider::after{content:"";flex:1;height:1px;background:#e2e8ec}
+.auth-card .google-button{display:flex;align-items:center;gap:10px;width:100%;justify-content:center;margin-top:0;background:#fff;border:1px solid #d5e1e7;color:#1d2b36;font-weight:600}
+.auth-card .google-button:hover:enabled{background:#f6f9fa}
+.otp-input{font-size:24px!important;letter-spacing:10px;text-align:center;font-variant-numeric:tabular-nums}
+.otp-actions{display:flex;justify-content:space-between}.otp-actions .auth-toggle{margin:14px 0 0}
 .header-actions{display:flex;align-items:center;gap:10px}
 
 /* Data-lab visual system */
