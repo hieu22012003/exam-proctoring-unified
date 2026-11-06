@@ -179,7 +179,7 @@ class Vision:
             eye_mid = (float(face[4]) + float(face[6])) / 2
             eye_span = max(1.0, abs(float(face[4]) - float(face[6])))
             track.head_yaw = (float(face[8]) - eye_mid) / eye_span
-            turning = abs(track.head_yaw) >= 0.30
+            turning = abs(track.head_yaw) >= self.settings.head_yaw
             if turning:
                 if now - track.head_suspicion_last > 0.75:
                     track.head_suspicion_since = now
@@ -207,6 +207,7 @@ class Vision:
                         track.baseline_owner = new_id
                 track.student_id = new_id
                 track.name = person["name"] if person else "Chưa xác định"
+                track.role = person.get("role", "student") if person else "student"
                 track.identity_score, track.identity_at = score, now
                 if new_id and track.baseline:
                     track.baseline_owner = new_id
@@ -279,6 +280,9 @@ class Vision:
                 track.head_suspicion_samples = 0
                 track.head_turning = False
                 track.standing_rule.reset()
+                track.head_down_rule.reset()
+                track.moving_rule.reset()
+                track.tired_rule.reset()
                 track.emotion_rule.reset()
                 track.left_arm_rule.reset()
                 track.right_arm_rule.reset()

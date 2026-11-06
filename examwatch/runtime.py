@@ -9,7 +9,8 @@ import cv2
 import numpy as np
 from .store import Store
 from .clips import EvidenceClips
-from .rules import body_angles
+from .rules import body_angles, Sustained, sensitivity_thresholds
+from .tracking import apply_thresholds
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +23,8 @@ class Runtime:
         saved_seconds=self.store.setting('standing_seconds',settings.standing_seconds)
         if type(saved_seconds) is int and 1<=saved_seconds<=300:
             self.settings.standing_seconds=saved_seconds
+        self._apply_detection(self.store.setting('detection', {}) or {})
+        self.dwell = {}
         self.vision_factory, self.speech_factory = vision_factory, speech_factory
         self.vision = self.speech = None
         self.session = None
@@ -82,9 +85,52 @@ class Runtime:
                 if self.vision and hasattr(self.vision,'tracker'):
                     targets+=list(self.vision.tracker.tracks.values())
                 for track in {id(t):t for t in targets}.values():
-                    track.standing_rule.seconds=seconds
+                    apply_thresholds(track, self.settings)
                     track.standing_rule.reset()
+                    track.head_down_rule.reset()
             return {'standing_threshold_seconds':self.settings.standing_seconds}
+
+    def _apply_detection(self, saved):
+        s = self.settings
+        if isinstance(saved.get('sensitivity'), int) and 0 <= saved['sensitivity'] <= 100:
+            s.sensitivity = saved['sensitivity']
+        for key, value in sensitivity_thresholds(s.sensitivity).items():
+            setattr(s, key, value)
+        evidence = saved.get('evidence') or {}
+        for kind in ('image', 'video', 'audio'):
+            if isinstance(evidence.get(kind), bool):
+                setattr(s, f'evidence_{kind}', evidence[kind])
+        dwell = saved.get('proctor_dwell_seconds')
+        if isinstance(dwell, int) and 10 <= dwell <= 1800:
+            s.proctor_dwell_seconds = dwell
+
+    def detection_settings(self):
+        s = self.settings
+        return {'standing_threshold_seconds': s.standing_seconds, 'sensitivity': s.sensitivity,
+                'evidence': {'image': s.evidence_image, 'video': s.evidence_video, 'audio': s.evidence_audio},
+                'proctor_dwell_seconds': s.proctor_dwell_seconds,
+                'thresholds': sensitivity_thresholds(s.sensitivity), 'max_people': s.max_people}
+
+    def configure_detection(self, sensitivity, evidence, proctor_dwell_seconds, standing_seconds):
+        if type(sensitivity) is not int or not 0 <= sensitivity <= 100:
+            raise ValueError('Độ nhạy phải là số nguyên từ 0 đến 100.')
+        if type(proctor_dwell_seconds) is not int or not 10 <= proctor_dwell_seconds <= 1800:
+            raise ValueError('Thời gian nhắc giám thị phải từ 10 đến 1800 giây.')
+        if not all(isinstance(evidence.get(k), bool) for k in ('image', 'video', 'audio')):
+            raise ValueError('Tham số bằng chứng không hợp lệ.')
+        with self.lock:
+            saved = {'sensitivity': sensitivity, 'evidence': {k: evidence[k] for k in ('image', 'video', 'audio')},
+                     'proctor_dwell_seconds': proctor_dwell_seconds}
+            self.store.set_setting('detection', saved)
+            self._apply_detection(saved)
+        self.configure_standing(standing_seconds)
+        with self.lock:
+            targets = list(self.visible)
+            if self.vision and hasattr(self.vision, 'tracker'):
+                targets += list(self.vision.tracker.tracks.values())
+            for track in {id(t): t for t in targets}.values():
+                apply_thresholds(track, self.settings)
+        return self.detection_settings()
 
     def load_vision(self):
         if self.vision is None:
@@ -137,7 +183,9 @@ class Runtime:
             # Enrollment is immutable during a session: avoid SQLite and JSON
             # parsing on every camera frame.
             self.gallery = self.store.students(with_embeddings=True)
-            self.session = self.store.new_session(title)
+            roster = [{"id": p["id"], "name": p["name"]} for p in self.gallery if p.get("role", "student") != "proctor"]
+            self.session = self.store.new_session(title, roster)
+            self.dwell = {}
             self.owner, self.started = owner, time.monotonic()
             self.capture_id = uuid.uuid4().hex
             self.last_audio_end = 0
@@ -220,38 +268,94 @@ class Runtime:
                         events.append((kind, f'{label}: góc {rule.value:.1f}°; dấu hiệu tư thế cần giám thị kiểm tra.'))
                 if track.standing_rule.update(track.posture == "standing", now):
                     events.append(("standing", f"Dấu hiệu nhổm dậy kéo dài ít nhất {self.settings.standing_seconds:g} giây; cần giám thị kiểm tra."))
+                if track.head_down_rule.update(track.posture == "head_down", now):
+                    events.append(("head_down", f"Cúi xuống kéo dài ít nhất {self.settings.standing_seconds:g} giây; cần giám thị kiểm tra."))
+                if track.moving_rule.update(track.posture == "moving", now):
+                    events.append(("moving", "Thí sinh rời khỏi vị trí ngồi đã hiệu chuẩn; cần giám thị kiểm tra."))
+                # Bowed head held for a long time with a flat/sad face reads as tiredness.
+                track.tired = track.tired_rule.update(track.posture == "head_down" and track.emotion in {"neutral", "sad", "unknown"}, now) \
+                    or (track.tired and track.posture == "head_down")
                 negative = (track.emotion in {"sad", "angry", "fear"}
                             and track.emotion_score >= self.settings.emotion_confidence)
                 if track.emotion_rule.update(negative, now):
-                    events.append(("negative_emotion", "Biểu cảm sad/angry/fear kéo dài ít nhất 20 giây; kiểm tra tình trạng thí sinh."))
+                    events.append(("negative_emotion", "Biểu cảm buồn/lo lắng kéo dài ít nhất 20 giây; kiểm tra tình trạng thí sinh."))
+                if track.role == "proctor":
+                    events = []  # proctors are never reported as candidates
                 for kind, detail in events:
-                    if kind in {'standing','arm_raise','body_lean','phone','head_turning'}:
-                        filename = uuid.uuid4().hex + '.webm'
-                        self.store.add_alert(self.session['id'], track, kind, detail, offset, filename)
-                        self.clips.trigger(filename, now, f'Track {track.id} | {kind} | session +{offset:.1f}s')
-                        continue
-                    filename = uuid.uuid4().hex + ".jpg"
-                    evidence = frame.copy()
-                    h, w = frame.shape[:2]
-                    x, y, bw, bh = track.box
-                    cv2.rectangle(evidence, (int(x * w), int(y * h)),
-                                  (int((x + bw) * w), int((y + bh) * h)), (50, 80, 255), 2)
-                    cv2.putText(evidence, f"Track {track.id} | {kind} | +{offset:.1f}s", (12, 26),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (50, 80, 255), 2)
-                    encoded, jpeg = cv2.imencode('.jpg', evidence)
-                    if not encoded:
-                        raise OSError("Không lưu được ảnh bằng chứng.")
-                    (self.settings.data / "evidence" / filename).write_bytes(jpeg.tobytes())
-                    self.store.add_alert(self.session["id"], track, kind, detail, offset, filename)
-                if now - track.observed_at >= 1.0:
+                    self._record_alert(track, kind, detail, offset, now, frame)
+                if track.role != "proctor" and now - track.observed_at >= 1.0:
                     self.store.observe(self.session["id"], track, offset)
                     track.observed_at = now
+            self._proctor_dwell(tracks, offset, now, frame)
             self.visible, self.last_frame = tracks, now
             self.inference_ms = round((now - started) * 1000)
             return {"tracks": [self.serialize(t, now) for t in tracks], "overflow": overflow,
                     "inference_ms": self.inference_ms, "offset_seconds": offset}
         finally:
             self.lock.release()
+
+    def _snapshot(self, frame, track, label):
+        evidence = frame.copy()
+        h, w = frame.shape[:2]
+        x, y, bw, bh = track.box
+        cv2.rectangle(evidence, (int(x * w), int(y * h)), (int((x + bw) * w), int((y + bh) * h)), (50, 80, 255), 2)
+        cv2.putText(evidence, label, (12, 26), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (50, 80, 255), 2)
+        encoded, jpeg = cv2.imencode('.jpg', evidence)
+        if not encoded:
+            raise OSError("Không lưu được ảnh bằng chứng.")
+        filename = uuid.uuid4().hex + ".jpg"
+        (self.settings.data / "evidence" / filename).write_bytes(jpeg.tobytes())
+        return filename
+
+    def _record_alert(self, track, kind, detail, offset, now, frame):
+        label = f"Track {track.id} | {kind} | +{offset:.1f}s"
+        video_kind = kind in {'standing', 'arm_raise', 'body_lean', 'phone', 'head_turning', 'head_down', 'moving', 'proctor_dwell'}
+        if video_kind and self.settings.evidence_video:
+            filename = uuid.uuid4().hex + '.webm'
+            thumb = self._snapshot(frame, track, label)
+            self.store.add_alert(self.session['id'], track, kind, detail, offset, filename, thumbnail=thumb)
+            self.clips.trigger(filename, now, label)
+        elif self.settings.evidence_image:
+            filename = self._snapshot(frame, track, label)
+            self.store.add_alert(self.session["id"], track, kind, detail, offset, filename, thumbnail=filename)
+        else:
+            self.store.add_alert(self.session["id"], track, kind, detail, offset, "")
+
+    def _proctor_dwell(self, tracks, offset, now, frame):
+        """Remind a registered proctor who stays beside one candidate's desk too long."""
+        proctors = [t for t in tracks if t.role == "proctor"]
+        students = [t for t in tracks if t.role != "proctor"]
+        active = set()
+        for proctor in proctors:
+            px, py = proctor.box[0] + proctor.box[2] / 2, proctor.box[1] + proctor.box[3] / 2
+            best = None
+            for student in students:
+                sx, sy = student.box[0] + student.box[2] / 2, student.box[1] + student.box[3] / 2
+                reach = max(0.08, student.box[2] * 2.5)
+                d = abs(px - sx)
+                if d < reach and abs(py - sy) < 0.3 and (best is None or d < best[0]):
+                    best = (d, student)
+            if not best:
+                continue
+            student = best[1]
+            key = (proctor.id, student.id)
+            active.add(key)
+            rule = self.dwell.setdefault(key, Sustained(self.settings.proctor_dwell_seconds, max_gap=4))
+            rule.seconds = self.settings.proctor_dwell_seconds
+            proctor.dwell_seconds, proctor.dwell_student = round(rule.elapsed(now), 1), student.name
+            if rule.update(True, now):
+                class Marker:  # alert row describes the proctor at the candidate's desk
+                    id, box, student_id = proctor.id, proctor.box, student.student_id
+                    name = f"{proctor.name} · bàn {student.name}"
+                self._record_alert(Marker, "proctor_dwell",
+                                   f"Giám thị {proctor.name} đứng cạnh bàn {student.name} quá {self.settings.proctor_dwell_seconds:g} giây.",
+                                   offset, now, frame)
+        for key in [k for k in self.dwell if k not in active]:
+            if now - (self.dwell[key].last or now) > 4:
+                del self.dwell[key]
+        for proctor in proctors:
+            if not any(k[0] == proctor.id for k in active):
+                proctor.dwell_seconds, proctor.dwell_student = 0, None
 
     @staticmethod
     def serialize(t, now):
@@ -269,6 +373,8 @@ class Runtime:
                 "lean_target": t.angles.get('lean_target'),
                 "pose_flags": [key for key,rule in [('left_arm',t.left_arm_rule),('right_arm',t.right_arm_rule),('lean',t.lean_rule)] if rule.flagged],
                 "standing_seconds": round(t.standing_rule.elapsed(now), 1),
+                "role": t.role, "tired": t.tired,
+                "dwell_seconds": getattr(t, "dwell_seconds", 0), "dwell_student": getattr(t, "dwell_student", None),
                 "negative_seconds": round(t.emotion_rule.elapsed(now), 1)}
 
     def queue_audio(self, samples, rate, offset, owner, capture_id):
@@ -295,8 +401,9 @@ class Runtime:
             self.audio_busy = True
             try:
                 for segment in self.speech.transcribe(samples, rate):
+                    audio = self._save_clip(samples, rate, segment) if self.settings.evidence_audio else None
                     self.store.add_transcript(session_id, offset + segment["start"],
-                                              offset + segment["end"], segment["text"])
+                                              offset + segment["end"], segment["text"], audio)
                 self.audio_error = None
             except Exception as exc:
                 logger.exception("Audio transcription failed")
@@ -304,6 +411,18 @@ class Runtime:
             finally:
                 self.audio_busy = False
                 self.audio.task_done()
+
+    def _save_clip(self, samples, rate, segment):
+        import wave
+        a = max(0, int((segment["start"] - 0.2) * rate))
+        b = min(len(samples), int((segment["end"] + 0.3) * rate)) or len(samples)
+        pcm = (np.clip(samples[a:b], -1, 1) * 32767).astype("<i2").tobytes()
+        if not pcm:
+            return None
+        filename = uuid.uuid4().hex + ".wav"
+        with wave.open(str(self.settings.data / "evidence" / filename), "wb") as wav:
+            wav.setnchannels(1); wav.setsampwidth(2); wav.setframerate(int(rate)); wav.writeframes(pcm)
+        return filename
 
     def status(self):
         return {"vision_revision": "adaptive-parallel-20261103", "pose_revision": "abdomen-20-20261103", "models": self.model_status(), "session": self.session,
@@ -316,7 +435,8 @@ class Runtime:
                 "firebase_sync": self.store.cloud.status(),
                 "inference_ms": self.inference_ms,
                 "camera_fresh": bool(self.session and time.monotonic() - self.last_frame < 3),
-                "max_people": self.settings.max_people}
+                "max_people": self.settings.max_people, "frame_width": self.settings.frame_width,
+                "detection": self.detection_settings()}
 
     def close(self):
         self.shutdown.set()

@@ -59,6 +59,11 @@ class Track:
     head_suspicion_last: float = -1e9
     head_suspicion_samples: int = 0
     head_alert_at: float = -1e9
+    role: str = "student"
+    tired: bool = False
+    head_down_rule: Sustained = field(default_factory=lambda: Sustained(5))
+    moving_rule: Sustained = field(default_factory=lambda: Sustained(3))
+    tired_rule: Sustained = field(default_factory=lambda: Sustained(20))
 
     def clear_identity(self, preserve_baseline=False):
         self.student_id, self.name = None, "Chưa xác định"
@@ -75,6 +80,15 @@ class Track:
             self.left_arm_rule.reset()
             self.right_arm_rule.reset()
             self.lean_rule.reset()
+
+
+def apply_thresholds(track, settings):
+    track.standing_rule.seconds = settings.standing_seconds
+    track.head_down_rule.seconds = settings.standing_seconds
+    track.moving_rule.seconds = max(2.0, settings.standing_seconds / 2)
+    track.emotion_rule.seconds = settings.negative_seconds
+    track.left_arm_rule.threshold = track.right_arm_rule.threshold = settings.arm_threshold
+    track.lean_rule.threshold = settings.lean_threshold
 
 
 class Tracker:
@@ -125,8 +139,7 @@ class Tracker:
             else:
                 self.counter += 1
                 track = Track(self.counter, box, now)
-                track.standing_rule.seconds = self.settings.standing_seconds
-                track.emotion_rule.seconds = self.settings.negative_seconds
+                apply_thresholds(track, self.settings)
                 self.tracks[track.id] = track
             track.box, track.last_seen = box, now
             active.append(track)

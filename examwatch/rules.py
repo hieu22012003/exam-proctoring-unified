@@ -167,13 +167,29 @@ def classify_posture(baseline, current):
         return "uncalibrated"
     if current is None:
         return "insufficient"
-    # Large lateral/scale changes invalidate a seat-relative comparison.
+    # Large lateral/scale changes invalidate a seat-relative comparison, but a
+    # body that keeps its size while sliding away from the seat has moved.
     ratio = current["shoulder_width"] / baseline["shoulder_width"]
-    if not 0.65 < ratio < 1.5 or abs(current["shoulder_x"] - baseline["shoulder_x"]) > 0.18:
+    shift = abs(current["shoulder_x"] - baseline["shoulder_x"])
+    if not 0.65 < ratio < 1.5:
         return "insufficient"
+    if shift > max(0.12, baseline["shoulder_width"] * 1.2):
+        return "moving"
     rise_head = baseline["nose_y"] - current["nose_y"]
     rise_shoulders = baseline["shoulder_y"] - current["shoulder_y"]
     threshold = max(0.07, baseline["scale"] * 0.75)
     if rise_head > threshold and rise_shoulders > threshold:
         return "standing"
+    # Head dropped towards the shoulders (bowed over the desk or under it).
+    neck = baseline["shoulder_y"] - baseline["nose_y"]
+    if neck > 0.01 and current["shoulder_y"] - current["nose_y"] < neck * 0.45:
+        return "head_down"
     return "seated"
+
+
+def sensitivity_thresholds(sensitivity):
+    """Map the 0-100 sensitivity slider onto detector thresholds (50 = defaults)."""
+    s = max(0, min(100, int(sensitivity)))
+    factor = 1.3 - 0.006 * s          # 0 -> x1.3, 50 -> x1.0, 100 -> x0.7
+    return {"phone_confidence": round(0.55 - 0.004 * s, 3), "head_yaw": round(0.42 - 0.0024 * s, 3),
+            "arm_threshold": 45.000001 * factor, "lean_threshold": 20.0 * factor}

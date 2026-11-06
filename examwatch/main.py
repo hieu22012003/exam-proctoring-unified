@@ -37,6 +37,28 @@ class Enrollment(BaseModel):
     student_id: str = Field(min_length=1, max_length=40, pattern=r"^[\w-]+$")
     name: str = Field(min_length=1, max_length=100)
     images: list[str] = Field(min_length=3, max_length=8)
+    role: str = Field("student", pattern=r"^(student|proctor)$")
+
+
+class EvidenceSettings(BaseModel):
+    image: bool = True
+    video: bool = True
+    audio: bool = True
+
+
+class DetectionSettings(BaseModel):
+    sensitivity: int = Field(strict=True, ge=0, le=100)
+    standing_threshold_seconds: int = Field(strict=True, ge=1, le=300)
+    proctor_dwell_seconds: int = Field(60, strict=True, ge=10, le=1800)
+    evidence: EvidenceSettings = EvidenceSettings()
+
+
+class Review(BaseModel):
+    category: str = Field(min_length=1, max_length=60)
+    decision: str = Field(pattern=r"^(violation|warning|dismissed)$")
+    note: str = Field("", max_length=2000)
+    reviewer: str = Field(min_length=1, max_length=100)
+    signature: str | None = Field(None, max_length=400_000)
 
 
 class AlertSettings(BaseModel):
@@ -267,10 +289,10 @@ def create_app(settings=None, runtime=None, otp_store=None):
             if float(similarities.min()) < settings.face_threshold:
                 raise ValueError("Ảnh đăng ký không nhất quán. Hãy chụp lại cùng một người.")
             try:
-                runtime.store.add_student(body.student_id, body.name.strip(), vectors)
+                runtime.store.add_student(body.student_id, body.name.strip(), vectors, body.role)
             except sqlite3.IntegrityError as exc:
                 raise HTTPException(409, "Mã thí sinh đã tồn tại.") from exc
-            return {"id": body.student_id, "name": body.name.strip(), "samples": len(vectors)}
+            return {"id": body.student_id, "name": body.name.strip(), "samples": len(vectors), "role": body.role}
 
     @app.delete("/api/students/{student_id}")
     def delete_student(student_id: str):
@@ -304,7 +326,8 @@ def create_app(settings=None, runtime=None, otp_store=None):
         row = runtime.store.session(session_id)
         if not row:
             raise HTTPException(404, "Không tìm thấy phiên thi.")
-        return {"session": row, "alerts": runtime.store.records(session_id, "alerts"),
+        return {"session": row, "attendance": runtime.store.attendance(session_id),
+                "alerts": runtime.store.records(session_id, "alerts"),
                 "transcripts": runtime.store.records(session_id, "transcripts"),
                 "observations": runtime.store.records(session_id, "observations")}
 
@@ -338,6 +361,102 @@ def create_app(settings=None, runtime=None, otp_store=None):
             raise ValueError("Dữ liệu âm thanh không hợp lệ.")
         runtime.queue_audio(samples, rate, offset, owner, capture_id)
         return {"queued": True}
+
+    @app.get("/api/settings/detection")
+    def detection_settings():
+        return runtime.detection_settings()
+
+    @app.post("/api/settings/detection")
+    def save_detection(body: DetectionSettings):
+        return runtime.configure_detection(body.sensitivity, body.evidence.model_dump(),
+                                           body.proctor_dwell_seconds, body.standing_threshold_seconds)
+
+    @app.get("/api/alerts")
+    def search_alerts(q: str = "", kind: str = "", status: str = "", session_id: str = "",
+                      date_from: str = "", date_to: str = "", limit: int = Query(500, ge=1, le=5000)):
+        return runtime.store.search_alerts(q.strip()[:100], kind, status, session_id, date_from, date_to, limit)
+
+    @app.get("/api/alerts/{alert_id}")
+    def alert_detail(alert_id: str):
+        row = runtime.store.alert(alert_id)
+        if not row:
+            raise HTTPException(404, "Không tìm thấy cảnh báo.")
+        session_row = runtime.store.session(row["session_id"]) or {}
+        return {**runtime.store._evidence_fields(row), "session_title": session_row.get("title", "")}
+
+    @app.post("/api/alerts/{alert_id}/review")
+    def review(alert_id: str, body: Review, request: Request):
+        signature = None
+        if body.signature:
+            prefix = "data:image/png;base64,"
+            if not body.signature.startswith(prefix):
+                raise ValueError("Chữ ký không hợp lệ.")
+            try:
+                png = base64.b64decode(body.signature[len(prefix):], validate=True)
+            except Exception as exc:
+                raise ValueError("Chữ ký không hợp lệ.") from exc
+            if not png.startswith(b"\x89PNG"):
+                raise ValueError("Chữ ký không hợp lệ.")
+            import uuid
+            signature = uuid.uuid4().hex + ".png"
+            (settings.data / "evidence" / signature).write_bytes(png)
+        account = getattr(request.state, "user", {}) or {}
+        reviewer = body.reviewer.strip()
+        if account.get("email") and account["email"] not in reviewer:
+            reviewer = f"{reviewer} ({account['email']})"
+        row = runtime.store.review(alert_id, body.category.strip(), body.decision, body.note.strip(), reviewer, signature)
+        if not row:
+            raise HTTPException(404, "Không tìm thấy cảnh báo.")
+        return runtime.store._evidence_fields(row)
+
+    def evidence_response(name, media):
+        path = runtime.store.evidence_file(name)
+        if path is None or not path.is_file():
+            raise HTTPException(404, "Không tìm thấy tệp bằng chứng.")
+        return FileResponse(path, media_type=media)
+
+    @app.get("/api/alerts/{alert_id}/thumb")
+    def thumb(alert_id: str):
+        row = runtime.store.alert(alert_id) or {}
+        name = row.get("thumbnail") or (row.get("image") if str(row.get("image", "")).endswith(".jpg") else None)
+        return evidence_response(name, "image/jpeg")
+
+    @app.get("/api/alerts/{alert_id}/signature")
+    def signature(alert_id: str):
+        return evidence_response((runtime.store.alert(alert_id) or {}).get("signature"), "image/png")
+
+    @app.get("/api/transcripts")
+    def transcripts(q: str = "", session_id: str = "", limit: int = Query(500, ge=1, le=5000)):
+        return runtime.store.search_transcripts(q.strip()[:100], session_id, limit)
+
+    @app.get("/api/transcripts/{transcript_id}/audio")
+    def transcript_audio(transcript_id: str):
+        path = runtime.store.transcript_audio(transcript_id)
+        return evidence_response(path.name if path else None, "audio/wav")
+
+    @app.get("/api/sessions/{session_id}/emotions")
+    def emotions(session_id: str, student_id: str = "", bucket: int = Query(10, ge=1, le=600)):
+        if not runtime.store.session(session_id):
+            raise HTTPException(404, "Không tìm thấy phiên thi.")
+        return runtime.store.mood_series(session_id, student_id, bucket)
+
+    @app.get("/api/sessions/{session_id}/report")
+    def report(session_id: str):
+        row = runtime.store.session(session_id)
+        if not row:
+            raise HTTPException(404, "Không tìm thấy phiên thi.")
+        alerts = runtime.store.search_alerts(session_id=session_id, limit=5000)
+        by_kind = {}
+        for a in alerts:
+            by_kind[a["kind"]] = by_kind.get(a["kind"], 0) + 1
+        confirmed = sum(a.get("decision") == "violation" for a in alerts)
+        open_count = sum(not a["acknowledged"] for a in alerts)
+        status = "violation" if confirmed else "pending" if open_count else "normal"
+        return {"session": row, "attendance": runtime.store.attendance(session_id),
+                "alerts": {"total": len(alerts), "open": open_count, "reviewed": len(alerts) - open_count,
+                           "confirmed": confirmed, "by_kind": by_kind},
+                "incidents": [a for a in alerts if a["acknowledged"]],
+                "status": status}
 
     @app.post("/api/alerts/{alert_id}/acknowledge")
     def acknowledge(alert_id: str):

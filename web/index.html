@@ -46,7 +46,9 @@
       <button class="nav" data-page="monitor"><span>◉</span> Giám sát trực tiếp</button>
       <div class="nav-section-label">QUẢN LÝ</div>
       <button class="nav" data-page="students"><span>▤</span> Thí sinh</button>
+      <button class="nav" data-page="incidents"><span>⚑</span> Sự cố</button>
       <button class="nav" data-page="history"><span>◷</span> Phiên thi & báo cáo</button>
+      <button class="nav" data-page="speech"><span>♫</span> Lời nói</button>
       <div class="nav-section-label nav-section-settings">HỆ THỐNG</div>
       <button class="nav" data-page="settings"><span>⚙</span> Cài đặt</button>
     </nav>
@@ -72,10 +74,12 @@
     <section id="monitor" class="page" hidden>
       <div class="page-heading"><div><div class="eyebrow">QUAN SÁT · GHI NHẬN · KIỂM TRA</div><h1>Giám sát trực tiếp<span class="title-dot">.</span></h1><p>Hình ảnh, tư thế và nội dung trao đổi trong cùng một phiên thi.</p></div><div class="session-state"><span id="live-dot"></span><b id="session-state">CHƯA BẮT ĐẦU</b><small id="session-clock">00:00:00</small></div></div>
       <div class="metrics">
-        <div class="metric"><span>THÍ SINH TRONG KHUNG</span><strong id="people-count">0 <small>/ 3</small></strong><i>01</i></div>
-        <div class="metric"><span>ĐÃ XÁC ĐỊNH DANH TÍNH</span><strong id="known-count">0</strong><i>02</i></div>
-        <div class="metric"><span>CẢNH BÁO TRONG PHIÊN</span><strong id="alert-count">0</strong><i>03</i></div>
-        <div class="metric"><span>THỜI GIAN XỬ LÝ ẢNH</span><strong id="latency">— <small>ms</small></strong><i>04</i></div>
+        <div class="metric"><span>TỔNG SỐ THÍ SINH</span><strong id="roster-count">—</strong><i>01</i></div>
+        <div class="metric"><span>ĐÃ ĐIỂM DANH</span><strong id="known-count">0</strong><i>02</i></div>
+        <div class="metric warn-metric"><span>CÓ SỰ CỐ</span><strong id="alert-count">0</strong><i>03</i></div>
+        <div class="metric"><span>ĐÃ GHI NHẬN</span><strong id="reviewed-count">0</strong><i>04</i></div>
+        <div class="metric"><span>TRONG KHUNG HÌNH</span><strong id="people-count">0 <small>/ 25</small></strong><i>05</i></div>
+        <div class="metric"><span>XỬ LÝ ẢNH</span><strong id="latency">— <small>ms</small></strong><i>06</i></div>
       </div>
       <div class="workspace">
         <div class="camera-column">
@@ -84,7 +88,7 @@
             <div class="camera-footer"><span><i class="legend identity"></i> Danh tính</span><span><i class="legend pose"></i> Tư thế</span><span><i class="legend emotion"></i> Cảm xúc</span><label><input id="show-pose" type="checkbox" checked> Hiện khung xương</label></div>
           </article>
           <div class="session-controls card"><div class="card-heading"><h2>Điều khiển phiên thi</h2><span class="muted">CAMERA · AI · GHI NHẬN</span></div><div class="session-controls-body"><label class="field">Tên phiên thi<input id="session-title" maxlength="100" placeholder="VD: Kiểm tra Toán · Phòng 101"></label><div class="control-buttons"><button id="start-session" class="button primary">▶ Bắt đầu phiên</button><button id="stop-session" class="button danger" disabled>■ Kết thúc</button><button id="calibrate" class="button secondary" disabled>⌖ Hiệu chuẩn ngồi</button></div><p class="hint">Hiệu chuẩn khi thí sinh đang ngồi bình thường và camera cố định. Ngưỡng cảnh báo được quản lý trong Cài đặt.</p></div></div>
-          <article class="card"><div class="card-heading"><h2>Thí sinh đang quan sát</h2><span class="muted">TỐI ĐA 3 NGƯỜI</span></div><div id="people" class="people"><div class="empty compact">Danh tính và nhãn cảm xúc sẽ xuất hiện khi phiên thi bắt đầu.</div></div></article>
+          <article class="card"><div class="card-heading"><h2>Thí sinh đang quan sát</h2><span class="muted" id="people-limit">TỐI ĐA 25 NGƯỜI</span></div><div id="people" class="people"><div class="empty compact">Danh tính và nhãn cảm xúc sẽ xuất hiện khi phiên thi bắt đầu.</div></div></article>
         </div>
         <div class="events-column">
           <article class="card alerts-card"><div class="card-heading"><h2>Cảnh báo <span class="count-badge" id="alert-badge">0</span></h2><span class="muted">CẦN KIỂM TRA</span></div><div id="alerts" class="event-list"><div class="empty"><span class="empty-icon">✓</span><h3>Chưa có cảnh báo</h3><p>Các sự kiện cần kiểm tra sẽ được<br>ghi nhận kèm ảnh và thời gian.</p></div></div></article>
@@ -95,25 +99,60 @@
     </section>
     <section id="students" class="page" hidden>
       <div class="page-heading"><div><div class="eyebrow">DANH TÍNH TRÊN THIẾT BỊ</div><h1>Danh sách thí sinh<span class="title-dot">.</span></h1><p>Đăng ký trước phiên thi để hiển thị tên trên camera.</p></div></div>
-      <div class="registration-grid"><article class="card registration"><div class="card-heading"><h2>Đăng ký khuôn mặt</h2><span class="muted">3 GÓC · TỐI ĐA 8 MẪU</span></div><p>Giữ camera cố định. Để một người trong khung hình và lần lượt nhìn thẳng, quay nhẹ sang trái, rồi sang phải.</p><div class="enroll-preview"><canvas id="enroll-preview"></canvas><div id="enroll-help"><span>Chưa kết nối camera</span><button type="button" id="connect-enroll-camera" class="button primary">Mở camera</button></div></div><div class="angle-guide" aria-label="Hướng dẫn chụp ba góc"><button type="button" class="angle-step active" data-angle="front"><b>01</b><span>Chính diện</span><small>Nhìn thẳng</small></button><button type="button" class="angle-step" data-angle="left"><b>02</b><span>Quay trái</span><small>Khoảng 20°</small></button><button type="button" class="angle-step" data-angle="right"><b>03</b><span>Quay phải</span><small>Khoảng 20°</small></button></div><form id="enroll-form"><label class="field">Mã thí sinh<input id="student-id" required maxlength="40" pattern="[\w\-]+" placeholder="VD: TS001"></label><label class="field">Họ và tên<input id="student-name" required maxlength="100" placeholder="Nguyễn Văn An"></label><div id="sample-thumbs" class="sample-thumbs"></div><div class="control-buttons"><button type="button" class="button secondary" id="take-sample">＋ Chụp góc chính diện <span id="sample-count">0/3</span></button><button type="button" class="button secondary" id="clear-samples">Chụp lại</button><button class="button primary" id="save-student">Lưu thí sinh</button></div><p id="angle-status" class="hint">Chụp ít nhất một mẫu ở cả ba góc. Có thể chọn lại một góc để chụp thêm.</p><p class="hint">Lưu vector khuôn mặt trên máy. Ảnh đăng ký gốc chỉ dùng để tạo vector, không lưu lại.</p></form></article><article class="card"><div class="card-heading"><h2>Đã đăng ký</h2><span id="student-count" class="muted">0 THÍ SINH</span></div><div id="student-list"></div></article></div>
+      <div class="registration-grid"><article class="card registration"><div class="card-heading"><h2>Đăng ký khuôn mặt</h2><span class="muted">3 GÓC · TỐI ĐA 8 MẪU</span></div><p>Giữ camera cố định. Để một người trong khung hình và lần lượt nhìn thẳng, quay nhẹ sang trái, rồi sang phải.</p><div class="enroll-preview"><canvas id="enroll-preview"></canvas><div id="enroll-help"><span>Chưa kết nối camera</span><button type="button" id="connect-enroll-camera" class="button primary">Mở camera</button></div></div><div class="angle-guide" aria-label="Hướng dẫn chụp ba góc"><button type="button" class="angle-step active" data-angle="front"><b>01</b><span>Chính diện</span><small>Nhìn thẳng</small></button><button type="button" class="angle-step" data-angle="left"><b>02</b><span>Quay trái</span><small>Khoảng 20°</small></button><button type="button" class="angle-step" data-angle="right"><b>03</b><span>Quay phải</span><small>Khoảng 20°</small></button></div><form id="enroll-form"><label class="field">Mã thí sinh<input id="student-id" required maxlength="40" pattern="[\w\-]+" placeholder="VD: TS001"></label><label class="field">Họ và tên<input id="student-name" required maxlength="100" placeholder="Nguyễn Văn An"></label><label class="field">Vai trò<select id="student-role"><option value="student">Thí sinh</option><option value="proctor">Giám thị (dùng cho nhắc đứng cạnh bàn quá lâu)</option></select></label><div id="sample-thumbs" class="sample-thumbs"></div><div class="control-buttons"><button type="button" class="button secondary" id="take-sample">＋ Chụp góc chính diện <span id="sample-count">0/3</span></button><button type="button" class="button secondary" id="clear-samples">Chụp lại</button><button class="button primary" id="save-student">Lưu thí sinh</button></div><p id="angle-status" class="hint">Chụp ít nhất một mẫu ở cả ba góc. Có thể chọn lại một góc để chụp thêm.</p><p class="hint">Lưu vector khuôn mặt trên máy. Ảnh đăng ký gốc chỉ dùng để tạo vector, không lưu lại.</p></form></article><article class="card"><div class="card-heading"><h2>Đã đăng ký</h2><span id="student-count" class="muted">0 THÍ SINH</span></div><div id="student-list"></div></article></div>
     </section>
     <section id="history" class="page" hidden>
       <div class="page-heading"><div><div class="eyebrow">DỮ LIỆU PHIÊN THI</div><h1>Lịch sử phiên thi<span class="title-dot">.</span></h1><p>Xem lại cảnh báo, diễn biến cảm xúc và nội dung trao đổi.</p></div></div>
       <div class="history-grid"><article class="card"><div class="card-heading"><h2>Các phiên đã ghi nhận</h2></div><div id="session-list"></div></article><article class="card history-detail" id="history-detail"><div class="empty">Chọn một phiên để xem dữ liệu.</div></article></div>
     </section>
+    <section id="incidents" class="page" hidden>
+      <div class="page-heading"><div><div class="eyebrow">LƯU TRỮ · TRA CỨU · THẨM TRA</div><h1>Lịch sử sự cố<span class="title-dot">.</span></h1><p>Tra cứu sự cố theo thời gian, loại, trạng thái; mở biên bản để ghi nhận quyết định của giám thị.</p></div></div>
+      <article class="card"><div class="filters">
+        <label class="field grow">Tìm kiếm<input id="inc-q" type="search" placeholder="Tên thí sinh, mã, ghi chú, phiên thi…"></label>
+        <label class="field">Loại sự cố<select id="inc-kind"><option value="">Tất cả</option></select></label>
+        <label class="field">Trạng thái<select id="inc-status"><option value="">Tất cả</option><option value="open">Chưa xử lý</option><option value="reviewed">Đã xử lý</option><option value="violation">Xác nhận vi phạm</option><option value="warning">Nhắc nhở</option><option value="dismissed">Không vi phạm</option></select></label>
+        <label class="field">Từ ngày<input id="inc-from" type="date"></label>
+        <label class="field">Đến ngày<input id="inc-to" type="date"></label>
+        <label class="field">Phiên thi<select id="inc-session"><option value="">Tất cả phiên</option></select></label>
+      </div><div class="table-wrap"><table class="incident-table"><thead><tr><th>Thời gian</th><th>Phiên thi</th><th>Thí sinh</th><th>Loại sự cố</th><th>Hình ảnh</th><th>Trạng thái</th><th></th></tr></thead><tbody id="inc-rows"></tbody></table></div><p class="hint" id="inc-summary"></p></article>
+    </section>
+    <section id="speech" class="page" hidden>
+      <div class="page-heading"><div><div class="eyebrow">PHIÊN ÂM · LƯU TRỮ · ĐỐI CHIẾU</div><h1>Lịch sử lời nói<span class="title-dot">.</span></h1><p>Tìm theo từ khóa (gõ có dấu hoặc không dấu) và nghe lại đoạn âm thanh gốc.</p></div></div>
+      <article class="card"><div class="filters"><label class="field grow">Từ khóa<input id="sp-q" type="search" placeholder="VD: nhắc bài, đáp án, câu 3…"></label><label class="field">Phiên thi<select id="sp-session"><option value="">Tất cả phiên</option></select></label></div><div id="sp-rows" class="speech-list"></div></article>
+    </section>
     <section id="settings" class="page" hidden>
       <div class="page-heading"><div><div class="eyebrow">QUẢN TRỊ WORKSPACE</div><h1>Cài đặt hệ thống<span class="title-dot">.</span></h1><p>Điều chỉnh ngưỡng phát hiện và kiểm tra thiết bị trước ca giám sát.</p></div></div>
       <div class="settings-grid">
-        <article class="card settings-card"><div class="card-heading"><div><h2>Ngưỡng cảnh báo</h2><p class="card-subtitle">Áp dụng cho các phiên giám sát tiếp theo.</p></div><span class="settings-icon">⚑</span></div><div class="settings-body"><div class="alert-settings"><label class="field" for="standing-threshold">Cảnh báo nhổm dậy sau (giây)<input id="standing-threshold" type="number" min="1" max="300" step="1" value="5"></label><button id="save-alert-settings" class="button primary">Lưu thay đổi</button></div><p id="standing-settings-status" class="hint" aria-live="polite">Chọn từ 1 đến 300 giây. Khi đổi ngưỡng, bộ đếm tư thế sẽ bắt đầu lại.</p><div class="settings-info"><b>Ngưỡng cảm xúc</b><span>Nhổm dậy sau <strong id="standing-threshold-hint">5</strong> giây hoặc cảm xúc tiêu cực liên tục 20 giây sẽ tạo cảnh báo.</span></div></div></article>
+        <article class="card settings-card"><div class="card-heading"><div><h2>Cài đặt AI</h2><p class="card-subtitle">Độ nhạy phát hiện và thời gian giám sát trước khi cảnh báo.</p></div><span class="settings-icon">⚑</span></div><div class="settings-body">
+          <label class="field">Độ nhạy phát hiện <b id="sensitivity-value">50%</b><input id="sensitivity" type="range" min="0" max="100" step="5" value="50"></label>
+          <p class="hint">Cao hơn: phát hiện điện thoại, quay đầu, tư thế sớm hơn nhưng dễ báo nhầm hơn.</p>
+          <div class="alert-settings"><label class="field" for="standing-threshold">Thời gian giám sát (giây)<input id="standing-threshold" type="number" min="1" max="300" step="1" value="5"></label><label class="field" for="proctor-dwell">Nhắc giám thị đứng cạnh bàn sau (giây)<input id="proctor-dwell" type="number" min="10" max="1800" step="5" value="60"></label></div>
+          <div class="settings-info"><b>Tham số bằng chứng</b><span class="evidence-toggles"><label><input type="checkbox" id="ev-image" checked> Hình ảnh</label><label><input type="checkbox" id="ev-video" checked> Video</label><label><input type="checkbox" id="ev-audio" checked> Âm thanh</label></span></div>
+          <button id="save-alert-settings" class="button primary">Lưu cấu hình</button>
+          <p id="standing-settings-status" class="hint" aria-live="polite">Thí sinh nhổm dậy, cúi xuống hoặc rời chỗ liên tục <strong id="standing-threshold-hint">5</strong> giây sẽ tạo cảnh báo; cảm xúc tiêu cực sau 20 giây.</p>
+        </div></article>
         <article class="card settings-card"><div class="card-heading"><div><h2>Kiểm tra micro</h2><p class="card-subtitle">Thu và nghe mẫu cục bộ trước khi bắt đầu phiên.</p></div><span class="settings-icon">♫</span></div><div class="mic-check-content"><p>Nói “Nhắc bài cho tôi với” trong lúc thu, sau đó nghe lại xem lời có rõ không.</p><div class="mic-check-actions"><button id="record-mic-sample" class="button secondary">Thu mẫu 8 giây</button><a id="download-mic-sample" class="button secondary" download="mau-micro.wav" hidden>Tải mẫu WAV</a></div><p id="mic-check-status" class="hint" aria-live="polite">Mẫu chỉ nằm trong tab này, không tự gửi lên máy chủ hay lưu vào phiên thi.</p><div id="mic-check-result" hidden><p id="mic-check-device" class="hint"></p><audio id="mic-check-player" controls preload="metadata"></audio><p id="mic-check-quality" class="hint"></p></div></div></article>
       </div>
       <div class="settings-note"><b>Chạy cục bộ</b><p>Camera, nhận diện và lưu dữ liệu được xử lý trên thiết bị. Trạng thái model và Firebase được hiển thị tại trang Tổng quan.</p></div>
     </section>
-    <footer>EXAMWATCH <span>Demo độc lập · 1–3 thí sinh · CPU / Offline</span><span>Video nhổm dậy, ảnh cảm xúc và bản chép lời được lưu cùng phiên thi.</span></footer>
+    <footer>EXAMWATCH <span>Giám sát phòng thi · tối đa 25 thí sinh</span><span>Video nhổm dậy, ảnh cảm xúc và bản chép lời được lưu cùng phiên thi.</span></footer>
   </main>
   <dialog id="evidence-dialog"><button id="close-evidence" class="button secondary">Đóng ×</button><img id="evidence-image" alt="Ảnh bằng chứng cảnh báo"><video id="evidence-video" controls playsinline hidden style="width:100%;max-height:70vh"></video><p id="evidence-caption"></p></dialog>
+  <dialog id="review-dialog" class="wide-dialog"><form method="dialog" id="review-form">
+    <div class="card-heading"><h2>Biên bản sự cố</h2><button type="button" class="button secondary" id="review-close">Đóng ×</button></div>
+    <div class="review-grid"><div id="review-evidence" class="review-evidence"></div><div>
+      <div id="review-info" class="review-info"></div>
+      <label class="field">Loại sự cố<select id="review-category"></select></label>
+      <div class="field">Quyết định<div class="decision-group"><label><input type="radio" name="decision" value="violation"> Xác nhận vi phạm</label><label><input type="radio" name="decision" value="warning" checked> Nhắc nhở</label><label><input type="radio" name="decision" value="dismissed"> Không vi phạm</label></div></div>
+      <label class="field">Ghi chú<textarea id="review-note" rows="3" maxlength="2000" placeholder="Mô tả sự việc, hình thức xử lý…"></textarea></label>
+      <label class="field">Giám thị xác nhận<input id="review-reviewer" required maxlength="100" placeholder="Họ tên giám thị"></label>
+      <div class="field">Chữ ký<canvas id="signature-pad" width="440" height="120"></canvas><button type="button" class="link-button" id="signature-clear">Xóa chữ ký</button></div>
+      <button class="button primary" id="review-submit" type="submit">Ghi nhận</button><p id="review-status" class="hint"></p>
+    </div></div></form></dialog>
+  <dialog id="report-dialog" class="wide-dialog"><div class="card-heading no-print"><h2>Báo cáo ca thi</h2><span><button class="button secondary" id="report-print">In / Lưu PDF</button> <button class="button secondary" id="report-close">Đóng ×</button></span></div><div id="report-body"></div></dialog>
   <script src="/static/frame-pair.js" defer></script>
   <script src="/static/mic-check.js" defer></script>
   <script src="/static/app.js" defer></script>
+  <script src="/static/features.js" defer></script>
 </body>
 </html>

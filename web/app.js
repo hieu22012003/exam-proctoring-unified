@@ -2,7 +2,10 @@
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const emotionNames = {angry:'Giận dữ',disgust:'Ghê sợ',fear:'Sợ hãi',happy:'Vui vẻ',sad:'Buồn',surprise:'Ngạc nhiên',neutral:'Trung tính',unknown:'Chưa rõ'};
-const postureNames = {seated:'Đang ngồi',standing:'Dấu hiệu đứng lên',uncalibrated:'Chưa hiệu chuẩn',insufficient:'Không đủ dữ liệu'};
+const postureNames = {seated:'Ngồi đúng tư thế',standing:'Dấu hiệu đứng lên',head_down:'Cúi xuống',moving:'Rời chỗ / di chuyển',uncalibrated:'Chưa hiệu chuẩn',insufficient:'Không đủ dữ liệu'};
+const moodNames = {normal:'Bình thường',anxious:'Lo lắng',tired:'Mệt mỏi',sad:'Buồn',unknown:'Chưa rõ'};
+const moodOf = (t) => t.tired ? 'tired' : ({neutral:'normal',happy:'normal',fear:'anxious',surprise:'anxious',angry:'anxious',disgust:'anxious',sad:'sad'})[t.emotion] || 'unknown';
+let maxPeople = 25, frameWidth = 1280;
 function poseWatchHTML(t) {
   const labels={left_arm:'Tay trái',right_arm:'Tay phải',lean:'Nghiêng thân'};
   const values=Object.entries(t.pose_angles||{}).filter(([,v])=>v!==null)
@@ -22,17 +25,6 @@ let cameraResultAt = null, cameraAnalysisFps = 0;
 const frameCanvas = document.createElement('canvas');
 const framePair = new ExamWatchFrames.FramePair();
 $('standing-threshold').addEventListener('input',()=>{standingSettingsDirty=true;});
-$('save-alert-settings').addEventListener('click',async()=>{
-  const seconds=Number($('standing-threshold').value);
-  if(!Number.isInteger(seconds)||seconds<1||seconds>300){notice('Chọn số nguyên từ 1 đến 300 giây.');return;}
-  $('save-alert-settings').disabled=true;
-  try{
-    const result=await api('/api/settings/alerts',json({standing_threshold_seconds:seconds}));
-    standingThreshold=result.standing_threshold_seconds;standingSettingsDirty=false;
-    $('standing-threshold-hint').textContent=standingThreshold;
-    $('standing-settings-status').textContent=`Đã áp dụng ${standingThreshold} giây. Thời gian nhổm dậy được đếm lại khi đổi ngưỡng.`;
-  }catch(e){notice(e.message);}finally{$('save-alert-settings').disabled=false;}
-});
 function clearProcessedFrame() {
   framePair.reset();
   cameraResultAt=null;cameraAnalysisFps=0;
@@ -66,7 +58,8 @@ function navigate(page) {
   currentPage = page;
   document.querySelectorAll('.page').forEach((e) => { e.hidden = e.id !== page; });
   document.querySelectorAll('.nav').forEach((e) => e.classList.toggle('active', e.dataset.page === page));
-  $('page-label').textContent = {overview:'TỔNG QUAN',monitor:'GIÁM SÁT TRỰC TIẾP',students:'THÍ SINH',history:'PHIÊN THI & BÁO CÁO',settings:'CÀI ĐẶT'}[page];
+  $('page-label').textContent = {overview:'TỔNG QUAN',monitor:'GIÁM SÁT TRỰC TIẾP',students:'THÍ SINH',incidents:'SỰ CỐ',history:'PHIÊN THI & BÁO CÁO',speech:'LỜI NÓI',settings:'CÀI ĐẶT'}[page];
+  window.examwatchPage?.(page);
   if (page === 'overview') loadOverview().catch((e)=>notice(e.message));
   if (page === 'students') loadStudents().catch((e) => notice(e.message));
   if (page === 'history') loadSessions().catch((e) => notice(e.message));
@@ -91,7 +84,7 @@ $('overview-session-list').addEventListener('click',async(e)=>{
 async function connectCamera() {
   if (camera?.getVideoTracks().some((t) => t.readyState === 'live')) return;
   if (!navigator.mediaDevices?.getUserMedia) throw new Error('Hãy mở bằng http://localhost:8000 hoặc http://127.0.0.1:8000 trên Chrome/Edge.');
-  camera = await navigator.mediaDevices.getUserMedia({video:{width:{ideal:960},height:{ideal:720},frameRate:{ideal:15,max:20}},audio:false});
+  camera = await navigator.mediaDevices.getUserMedia({video:{width:{ideal:1280},height:{ideal:720},frameRate:{ideal:15,max:20}},audio:false});
   $('video').srcObject = camera;
   await $('video').play();
   $('camera-stage').style.aspectRatio = `${$('video').videoWidth} / ${$('video').videoHeight}`;
@@ -113,7 +106,7 @@ $('connect-enroll-camera').addEventListener('click', () => connectCamera().catch
 function captureCanvas() {
   const video = $('video');
   if (!camera || video.readyState < 2 || !video.videoWidth) throw new Error('Camera chưa sẵn sàng.');
-  const width = Math.min(960, video.videoWidth);
+  const width = Math.min(frameWidth, video.videoWidth);
   const height = Math.round(video.videoHeight * width / video.videoWidth);
   if(frameCanvas.width!==width||frameCanvas.height!==height){frameCanvas.width=width;frameCanvas.height=height;}
   frameCanvas.getContext('2d').drawImage(video, 0, 0, frameCanvas.width, frameCanvas.height);
@@ -276,8 +269,7 @@ async function frameLoop() {
       if(cameraResultAt!==null){const fps=1000/Math.max(1,resultAt-cameraResultAt);cameraAnalysisFps=cameraAnalysisFps ? .3*fps+.7*cameraAnalysisFps : fps;}
       cameraResultAt=resultAt;
       $('camera-stamp').textContent = `ẢNH ĐÃ PHÂN TÍCH · ${Math.round(resultAt-started)} ms · ${cameraAnalysisFps.toFixed(1)} FPS AI`;
-      $('people-count').innerHTML = `${tracks.length} <small>/ 3</small>`;
-      $('known-count').textContent = tracks.filter((t) => t.student_id).length;
+      $('people-count').innerHTML = `${tracks.filter(t=>t.role!=='proctor').length} <small>/ ${maxPeople}</small>`;
       $('latency').innerHTML = `${result.inference_ms} <small>ms</small>`;
       renderPeople();
       if (result.overflow) notice('Có hơn 3 khuôn mặt. Bản demo chỉ xử lý 3 khuôn mặt lớn nhất.', true);
@@ -295,7 +287,7 @@ async function frameLoop() {
   }
 }
 function renderPeople() {
-  $('people').innerHTML = tracks.length ? tracks.map((t) => `<div class="person"><span class="avatar">${esc(t.student_id ? t.name.split(' ').map(s=>s[0]).slice(-2).join('') : '#'+t.id)}</span><div class="person-text"><b>${esc(t.name)}</b><small>${esc(postureNames[t.posture])}${t.has_phone ? ' · Phát hiện điện thoại' : ''}${t.posture==='standing' ? ` · ${t.standing_seconds}s / ${standingThreshold}s` : ''}${t.negative_seconds ? ` · tiêu cực ${t.negative_seconds}s / 20s` : ''}</small>${poseWatchHTML(t)}</div><span class="tag ${t.has_phone||['sad','angry','fear'].includes(t.emotion)?'warn':''}">${t.has_phone ? 'Điện thoại · '+Math.round(t.phone_confidence*100)+'%' : `${esc(emotionNames[t.emotion])} ${t.emotion==='unknown'?'':Math.round(t.emotion_score*100)+'%'}`}</span></div>`).join('') : '<div class="empty compact">Chưa thấy khuôn mặt. Hãy kiểm tra góc camera và ánh sáng.</div>';
+  $('people').innerHTML = tracks.length ? [...tracks].sort((a,b)=>(b.role==='proctor')-(a.role==='proctor')).map((t) => t.role==='proctor' ? `<div class="person proctor"><span class="avatar">GT</span><div class="person-text"><b>${esc(t.name)} · Giám thị</b><small>${t.dwell_student ? `Đứng cạnh bàn ${esc(t.dwell_student)} · ${Math.round(t.dwell_seconds)}s` : 'Đang di chuyển trong phòng'}</small></div><span class="tag ${t.dwell_seconds>=(window.examwatchDwell||60)*.8?'warn':''}">Giám thị</span></div>` : `<div class="person"><span class="avatar">${esc(t.student_id ? t.name.split(' ').map(s=>s[0]).slice(-2).join('') : '#'+t.id)}</span><div class="person-text"><b>${esc(t.name)}</b><small>${esc(postureNames[t.posture])}${t.has_phone ? ' · Phát hiện điện thoại' : ''}${t.posture==='standing' ? ` · ${t.standing_seconds}s / ${standingThreshold}s` : ''}${t.negative_seconds ? ` · tiêu cực ${t.negative_seconds}s / 20s` : ''}</small>${poseWatchHTML(t)}</div><span class="tag ${t.has_phone||['anxious','sad','tired'].includes(moodOf(t))?'warn':''}">${t.has_phone ? 'Điện thoại · '+Math.round(t.phone_confidence*100)+'%' : `${esc(moodNames[moodOf(t)])} · ${esc(emotionNames[t.emotion])} ${t.emotion==='unknown'?'':Math.round(t.emotion_score*100)+'%'}`}</span></div>`).join('') : '<div class="empty compact">Chưa thấy khuôn mặt. Hãy kiểm tra góc camera và ánh sáng.</div>';
 }
 const connections = [[0,1],[1,2],[2,3],[3,7],[0,4],[4,5],[5,6],[6,8],[11,12],[11,13],[13,15],[12,14],[14,16],[11,23],[12,24],[23,24]];
 function draw() {
@@ -310,9 +302,9 @@ function draw() {
     const ctx=canvas.getContext('2d'), w=canvas.width,h=canvas.height;
     if (pairedTracks && performance.now()-trackAt < 1800) for (const t of pairedTracks) {
       const [x,y,bw,bh] = t.bbox;
-      ctx.strokeStyle = t.student_id ? '#c7e895' : '#f0cd86'; ctx.lineWidth=2;
+      ctx.strokeStyle = t.role==='proctor' ? '#7fb7ff' : t.student_id ? '#c7e895' : '#f0cd86'; ctx.lineWidth=2;
       ctx.strokeRect(x*w,y*h,bw*w,bh*h);
-      const label = `${t.name} · ${t.has_phone ? 'Điện thoại' : t.head_turning ? 'Quay đầu' : emotionNames[t.emotion]}`;
+      const label = t.role==='proctor' ? `${t.name} · Giám thị${t.dwell_seconds?` · ${Math.round(t.dwell_seconds)}s`:''}` : `${t.name} · ${t.has_phone ? 'Điện thoại' : t.head_turning ? 'Quay đầu' : ['standing','head_down','moving'].includes(t.posture) ? postureNames[t.posture] : moodNames[moodOf(t)]}`;
       ctx.font=`${Math.max(12,Math.round(w/65))}px Segoe UI`;
       const tw=ctx.measureText(label).width+14;
       const ly=Math.max(25,y*h-4);
@@ -376,14 +368,14 @@ $('enroll-form').addEventListener('submit', async (event) => {
   if(missing.length) return notice(`Cần chụp đủ ba góc: ${missing.map(a=>angleNames[a]).join(', ')}.`);
   busy=true;updateControls();
   try {
-    await api('/api/students',json({student_id:$('student-id').value.trim(),name:$('student-name').value.trim(),images:samples.map(s=>s.data)}));
+    await api('/api/students',json({student_id:$('student-id').value.trim(),name:$('student-name').value.trim(),images:samples.map(s=>s.data),role:$('student-role').value}));
     samples=[];renderSamples();$('enroll-form').reset();await loadStudents();notice('Đã lưu thông tin và đặc trưng khuôn mặt.');
   } catch(e){notice(e.message,true);}finally{busy=false;updateControls();}
 });
 async function loadStudents() {
   const students=await api('/api/students');
-  $('student-count').textContent=`${students.length} THÍ SINH`;
-  $('student-list').innerHTML=students.length?students.map((s)=>`<div class="student-row"><span class="avatar">${esc(s.name.split(' ').slice(-1)[0][0])}</span><div class="person-text"><b>${esc(s.name)}</b><small>${esc(s.id)} · ${s.samples} mẫu</small></div><button class="button danger" data-delete="${esc(s.id)}" ${session?'disabled':''}>Xóa</button></div>`).join(''):'<div class="empty">Chưa có thí sinh đăng ký.</div>';
+  $('student-count').textContent=`${students.filter(s=>s.role!=='proctor').length} THÍ SINH · ${students.filter(s=>s.role==='proctor').length} GIÁM THỊ`;
+  $('student-list').innerHTML=students.length?students.map((s)=>`<div class="student-row"><span class="avatar">${esc(s.name.split(' ').slice(-1)[0][0])}</span><div class="person-text"><b>${esc(s.name)}</b><small>${esc(s.id)} · ${s.samples} mẫu${s.role==='proctor'?' · <b>Giám thị</b>':''}</small></div><button class="button danger" data-delete="${esc(s.id)}" ${session?'disabled':''}>Xóa</button></div>`).join(''):'<div class="empty">Chưa có thí sinh đăng ký.</div>';
 }
 $('student-list').addEventListener('click',async(e)=>{
   const button=e.target.closest('[data-delete]');if(!button)return;
@@ -391,26 +383,31 @@ $('student-list').addEventListener('click',async(e)=>{
   try{await api(`/api/students/${encodeURIComponent(button.dataset.delete)}`,{method:'DELETE'});await loadStudents();}catch(err){notice(err.message);}
 });
 function alertHTML(a) {
-  const eventNames={phone:'VẬT THỂ · ĐIỆN THOẠI',head_turning:'HƯỚNG MẶT · QUAY ĐẦU KÉO DÀI',standing:'TƯ THẾ · NHỔM DẬY',arm_raise:'TƯ THẾ · GÓC TAY TĂNG',body_lean:'TƯ THẾ · NGHIÊNG THÂN',negative_emotion:'CẢM XÚC TIÊU CỰC ≥ 20 GIÂY'};
+  const eventNames=window.examwatchEventNames;
   const video=a.evidence_type==='video';
-  const evidence=video
+  const evidence=a.evidence_type==='none' ? '<span class="tag">Không lưu bằng chứng</span>' : video
     ? a.evidence_status==='ready'
       ? `<button class="button secondary" data-video="${a.id}" data-caption="${esc(a.student_name+' · '+timestamp(a.created_at))}">Xem video ↗</button>`
       : `<span class="tag">${a.evidence_status==='failed'?'Không tạo được video':'Đang hoàn tất video…'}</span>`
     : `<button class="button secondary" data-image="${a.id}" data-caption="${esc(a.student_name+' · '+timestamp(a.created_at))}">Xem ảnh ↗</button>`;
-  return `<div class="event"><span class="event-kind">${esc(eventNames[a.kind]||a.kind)}</span><div class="event-title"><span>${esc(a.student_name)} <span class="muted">#${a.track_id}</span></span><time>${duration(a.offset_seconds)}</time></div><p>${esc(a.detail)}</p><div class="event-actions">${evidence}${a.acknowledged?'<span class="tag">Đã kiểm tra</span>':`<button class="button secondary" data-ack="${a.id}">Đã kiểm tra</button>`}</div></div>`;
+  return `<div class="event"><span class="event-kind">${esc(eventNames[a.kind]||a.kind)}</span><div class="event-title"><span>${esc(a.student_name)} <span class="muted">#${a.track_id}</span></span><time>${duration(a.offset_seconds)}</time></div><p>${esc(a.detail)}</p><div class="event-actions">${evidence}${a.acknowledged?`<span class="tag decision-${esc(a.decision||'done')}">${esc(a.decision_label||'Đã kiểm tra')}</span><button class="button secondary" data-review="${a.id}">Biên bản</button>`:`<button class="button primary" data-review="${a.id}">Ghi nhận</button>`}</div></div>`;
 }
-const transcriptHTML=(t)=>`<div class="transcript"><time>${duration(t.start_seconds)} — ${duration(t.end_seconds)}</time><p>${esc(t.text)}</p></div>`;
+const transcriptHTML=(t)=>`<div class="transcript"><time>${duration(t.start_seconds)} — ${duration(t.end_seconds)}</time><p>${esc(t.text)}</p>${t.has_audio?`<audio controls preload="none" src="/api/transcripts/${t.id}/audio"></audio>`:''}</div>`;
 async function loadSessionData(id) {
   const data=await api(`/api/sessions/${id}`);
   if(session?.id===id) {
-    $('alert-count').textContent=data.alerts.length;
-    $('alert-badge').textContent=data.alerts.filter(a=>!a.acknowledged).length;
+    const open=data.alerts.filter(a=>!a.acknowledged).length;
+    $('alert-count').textContent=open;
+    $('reviewed-count').textContent=data.alerts.length-open;
+    $('alert-badge').textContent=open;
+    if(data.attendance){$('roster-count').textContent=data.attendance.total;$('known-count').innerHTML=`${data.attendance.present} <small>/ ${data.attendance.total}</small>`;}
+    window.examwatchLiveAlerts?.(data.alerts);
     if(data.alerts.length)$('alerts').innerHTML=data.alerts.map(alertHTML).join('');
     if(data.transcripts.length)$('transcripts').innerHTML=[...data.transcripts].reverse().map(transcriptHTML).join('');
   }
   if(viewing===id) renderHistory(data);
   lastRecords=data;
+  if(viewing===id) window.examwatchHistoryRendered?.(data);
   return data;
 }
 async function loadSessions() {
@@ -425,13 +422,17 @@ $('session-list').addEventListener('click',async(e)=>{
 });
 function renderHistory(data) {
   const row=data.session;
-  $('history-detail').innerHTML=`<div class="card-heading"><h2>${esc(row.title)}</h2><a class="button secondary" href="/api/sessions/${row.id}/export">Xuất JSON ↓</a></div><div class="history-content"><p>${timestamp(row.started_at)} — ${row.ended_at?timestamp(row.ended_at):'Đang hoạt động'}</p><p class="hint">Màn hình hiển thị tối đa 300 bản ghi mới nhất mỗi loại. File JSON chứa toàn bộ dữ liệu đã lưu.</p><h3>Cảnh báo</h3>${data.alerts.length?data.alerts.map(alertHTML).join(''):'<p>Không có cảnh báo.</p>'}<h3>Nội dung trao đổi</h3>${data.transcripts.length?[...data.transcripts].reverse().map(transcriptHTML).join(''):'<p>Chưa có bản chép lời.</p>'}<h3>Diễn biến quan sát</h3><div class="table-wrap"><table><thead><tr><th>Mốc phiên</th><th>Thí sinh</th><th>Cảm xúc</th><th>Tư thế</th></tr></thead><tbody>${data.observations.map(o=>`<tr><td>${duration(o.offset_seconds)}</td><td>${esc(o.student_name)} #${o.track_id}</td><td>${esc(emotionNames[o.emotion])} ${Math.round(o.confidence*100)}%</td><td>${esc(postureNames[o.posture])}</td></tr>`).join('')}</tbody></table></div></div>`;
+  $('history-detail').innerHTML=`<div class="card-heading"><h2>${esc(row.title)}</h2><span><button class="button primary" data-report="${row.id}">Báo cáo ca thi</button> <a class="button secondary" href="/api/sessions/${row.id}/export">Xuất JSON ↓</a></span></div><div class="history-content"><p>${timestamp(row.started_at)} — ${row.ended_at?timestamp(row.ended_at):'Đang hoạt động'}</p><p class="hint">Màn hình hiển thị tối đa 300 bản ghi mới nhất mỗi loại. File JSON chứa toàn bộ dữ liệu đã lưu.</p><h3>Cảnh báo</h3>${data.alerts.length?data.alerts.map(alertHTML).join(''):'<p>Không có cảnh báo.</p>'}<h3>Điểm danh</h3>${data.attendance?`<p>${data.attendance.present}/${data.attendance.total} thí sinh có mặt · vắng ${data.attendance.absent}</p>`:''}<h3>Biểu cảm theo thời gian</h3><div class="mood-chart" data-mood-session="${row.id}"><div class="empty compact">Đang tải biểu đồ…</div></div><h3>Nội dung trao đổi</h3>${data.transcripts.length?[...data.transcripts].reverse().map(transcriptHTML).join(''):'<p>Chưa có bản chép lời.</p>'}<h3>Diễn biến quan sát</h3><div class="table-wrap"><table><thead><tr><th>Mốc phiên</th><th>Thí sinh</th><th>Cảm xúc</th><th>Tư thế</th></tr></thead><tbody>${data.observations.map(o=>`<tr><td>${duration(o.offset_seconds)}</td><td>${esc(o.student_name)} #${o.track_id}</td><td>${esc(moodNames[o.mood]||'')} · ${esc(emotionNames[o.emotion])} ${Math.round(o.confidence*100)}%</td><td>${esc(postureNames[o.posture])}</td></tr>`).join('')}</tbody></table></div></div>`;
 }
 document.addEventListener('click',async(e)=>{
   const image=e.target.closest('[data-image]');
   if(image){$('evidence-video').hidden=true;$('evidence-image').hidden=false;$('evidence-image').src=`/api/alerts/${image.dataset.image}/image`;$('evidence-caption').textContent=image.dataset.caption;$('evidence-dialog').showModal();}
   const video=e.target.closest('[data-video]');
   if(video){$('evidence-image').hidden=true;$('evidence-video').hidden=false;$('evidence-video').src=`/api/alerts/${video.dataset.video}/video`;$('evidence-caption').textContent=video.dataset.caption;$('evidence-dialog').showModal();}
+  const review=e.target.closest('[data-review]');
+  if(review){window.openReview(review.dataset.review);return;}
+  const report=e.target.closest('[data-report]');
+  if(report){window.openReport(report.dataset.report);return;}
   const ack=e.target.closest('[data-ack]');
   if(ack)try{await api(`/api/alerts/${ack.dataset.ack}/acknowledge`,json({}));if(session)await loadSessionData(session.id);if(viewing&&viewing!==session?.id)await loadSessionData(viewing);}catch(err){notice(err.message);}
 });
@@ -442,6 +443,9 @@ async function poll() {
   try {
     const status=await api('/api/status');
     standingThreshold=status.standing_threshold_seconds||5;
+    maxPeople=status.max_people||maxPeople; frameWidth=status.frame_width||frameWidth;
+    $('people-limit').textContent=`TỐI ĐA ${maxPeople} NGƯỜI`;
+    window.examwatchStatus?.(status);
     $('standing-threshold-hint').textContent=standingThreshold;
     if(!standingSettingsDirty&&document.activeElement!==$('standing-threshold'))$('standing-threshold').value=standingThreshold;
     $('connection-dot').style.color='#7b9d5c';
