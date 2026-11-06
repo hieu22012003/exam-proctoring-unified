@@ -304,8 +304,13 @@ def create_app(settings=None, runtime=None):
             raise HTTPException(404, 'Video chưa sẵn sàng hoặc không tồn tại.')
         return FileResponse(path, media_type='video/webm')
 
-    app.mount("/static", StaticFiles(directory=ROOT / "web"), name="static")
-
+    static_dir = ROOT / "web"
+    try:
+        static_dir.mkdir(parents=True, exist_ok=True)
+        app.mount("/static", StaticFiles(directory=static_dir), name="static")
+    except Exception:
+        pass
+    
     @app.get("/")
     def index():
         return FileResponse(ROOT / "web" / "index.html")
