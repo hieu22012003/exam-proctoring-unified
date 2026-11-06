@@ -4,6 +4,8 @@ import base64
 import json
 import os
 import sqlite3
+import threading
+import urllib.request
 import cv2
 import numpy as np
 from fastapi import FastAPI, HTTPException, Request, Query
@@ -87,6 +89,17 @@ def decode_frame(data, width):
     return frame
 
 
+def _keep_vision_warm(url, stop, every=600):
+    """Wake the vision service (free hosts sleep when idle) and have it load its models
+    before the first frame arrives; repeat while this API is awake."""
+    while not stop.is_set():
+        try:
+            urllib.request.urlopen(url.rstrip("/") + "/healthz?warm=1", timeout=90).read()
+        except Exception:
+            pass
+        stop.wait(every)
+
+
 def create_app(settings=None, runtime=None, otp_store=None):
     settings = settings or Settings.load()
     runtime = runtime or Runtime(settings)
@@ -95,7 +108,11 @@ def create_app(settings=None, runtime=None, otp_store=None):
 
     @asynccontextmanager
     async def lifespan(app):
+        stop = threading.Event()
+        if getattr(settings, "vision_url", ""):
+            threading.Thread(target=_keep_vision_warm, args=(settings.vision_url, stop), daemon=True).start()
         yield
+        stop.set()
         runtime.close()
 
     app = FastAPI(title="ExamWatch Local", lifespan=lifespan)

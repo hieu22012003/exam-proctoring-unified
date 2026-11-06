@@ -50,7 +50,9 @@ def models():
 
 
 @app.get("/healthz")
-def healthz():
+def healthz(warm: int = Query(0, ge=0, le=1)):
+    if warm and not _models:  # pre-load in the background so the first frame is fast
+        threading.Thread(target=models, daemon=True).start()
     return {"ok": True, "loaded": bool(_models)}
 
 
