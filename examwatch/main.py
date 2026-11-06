@@ -426,8 +426,12 @@ def create_app(settings=None, runtime=None, otp_store=None):
         return evidence_response((runtime.store.alert(alert_id) or {}).get("signature"), "image/png")
 
     @app.get("/api/transcripts")
-    def transcripts(q: str = "", session_id: str = "", limit: int = Query(500, ge=1, le=5000)):
-        return runtime.store.search_transcripts(q.strip()[:100], session_id, limit)
+    def transcripts(q: str = "", session_id: str = "", speaker: str = "", limit: int = Query(500, ge=1, le=5000)):
+        return runtime.store.search_transcripts(q.strip()[:100], session_id, limit, speaker)
+
+    @app.get("/api/speakers")
+    def speakers():
+        return runtime.store.speakers()
 
     @app.get("/api/transcripts/{transcript_id}/audio")
     def transcript_audio(transcript_id: str):

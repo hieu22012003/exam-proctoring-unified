@@ -19,6 +19,9 @@ ARTIFACTS = {
         "https://huggingface.co/serengil/deepface/resolve/main/facial_expression_model_weights.onnx", 100_000),
     "pose_lite.task": (
         "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task", 1_000_000),
+    # Face blendshapes (eye closure, yawning) for the "tired" support state.
+    "face_landmarker.task": (
+        "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task", 1_000_000),
     # Multi-person body pose for full classrooms (AGPL-3.0, Ultralytics).
     "yolo11n-pose.pt": (
         "https://github.com/ultralytics/assets/releases/download/v8.3.0/yolo11n-pose.pt", 1_000_000),

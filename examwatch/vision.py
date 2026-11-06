@@ -22,6 +22,54 @@ def coco_to_mediapipe(keypoints, width, height):
     return out
 
 
+def region(gray, cx, cy, half_w, half_h, size=(32, 20)):
+    """Fixed-size grayscale patch around a point; None when it leaves the frame."""
+    h, w = gray.shape[:2]
+    x1, x2 = int(cx - half_w), int(cx + half_w)
+    y1, y2 = int(cy - half_h), int(cy + half_h)
+    if x1 < 0 or y1 < 0 or x2 > w or y2 > h or x2 - x1 < 6 or y2 - y1 < 4:
+        return None
+    return cv2.resize(gray[y1:y2, x1:x2], size, interpolation=cv2.INTER_AREA).astype(np.float32)
+
+
+def mouth_motion(track, gray, face):
+    """Frame-to-frame motion of the mouth minus the eye band (head motion, lighting).
+
+    A cheap per-frame speaking cue: lips move while talking, the eye band mostly does not."""
+    eye_l, eye_r = (float(face[4]), float(face[5])), (float(face[6]), float(face[7]))
+    m_l, m_r = (float(face[10]), float(face[11])), (float(face[12]), float(face[13]))
+    span = max(4.0, abs(m_r[0] - m_l[0]))
+    mouth = region(gray, (m_l[0] + m_r[0]) / 2, (m_l[1] + m_r[1]) / 2 + span * .12, span * .85, span * .55)
+    eyes = region(gray, (eye_l[0] + eye_r[0]) / 2, (eye_l[1] + eye_r[1]) / 2, span * 1.1, span * .4)
+    prev = getattr(track, 'mouth_patch', None)
+    track.mouth_patch = (mouth, eyes)
+    if mouth is None or eyes is None or prev is None or prev[0] is None or prev[1] is None:
+        return 0.0
+    activity = max(0.0, float(np.mean(np.abs(mouth - prev[0]))) - .8 * float(np.mean(np.abs(eyes - prev[1]))))
+    track.mouth_activity = .5 * activity + .5 * getattr(track, 'mouth_activity', 0.0)
+    return track.mouth_activity
+
+
+def update_drowsiness(track, blendshapes, now, window=60.0):
+    """PERCLOS (share of samples with eyes closed) and yawns from face blendshapes."""
+    scores = {c.category_name: float(c.score) for c in blendshapes}
+    eyes = (scores.get('eyeBlinkLeft', 0) + scores.get('eyeBlinkRight', 0)) / 2
+    jaw = scores.get('jawOpen', 0)
+    samples = getattr(track, 'eye_samples', None)
+    if samples is None:
+        from collections import deque
+        samples = track.eye_samples = deque(maxlen=120)
+    samples.append((now, eyes >= .55, jaw >= .6))
+    while samples and now - samples[0][0] > window * 2:
+        samples.popleft()
+    recent = [s for s in samples if now - s[0] <= window]
+    track.perclos = sum(s[1] for s in recent) / len(recent) if len(recent) >= 5 else 0.0
+    track.yawns = sum(s[2] for s in samples)
+    track.eyes_closed, track.jaw_open = eyes, jaw
+    track.drowsy = len(recent) >= 5 and (track.perclos >= .35 or track.yawns >= 2)
+    return track.drowsy
+
+
 def due(tracks, stamp, interval, now, budget):
     """Tracks whose identity/emotion refresh is due, oldest first, capped per frame."""
     ready = [t for t in tracks if now - getattr(t, stamp) >= interval]
@@ -83,6 +131,21 @@ class Vision:
         self.multi_until = 0
         self.last_timestamp = 0
         self.tracker = Tracker(settings)
+        self.face_mesh = None
+        mesh_path = root / "face_landmarker.task"
+        if mesh_path.is_file():
+            try:  # eye closure / yawning for the "tired" state; optional
+                self.face_mesh = mp.tasks.vision.FaceLandmarker.create_from_options(
+                    mp.tasks.vision.FaceLandmarkerOptions(
+                        base_options=mp.tasks.BaseOptions(model_asset_buffer=mesh_path.read_bytes()),
+                        running_mode=mp.tasks.vision.RunningMode.IMAGE, num_faces=1,
+                        output_face_blendshapes=True, min_face_detection_confidence=.4))
+            except Exception:
+                import logging
+                logging.getLogger(__name__).exception("Face landmarker unavailable")
+                self.face_mesh = None
+        self.phone_worker = ThreadPoolExecutor(max_workers=1, thread_name_prefix='examwatch-phone')
+        self.phone_boxes, self.phone_at = [], -1e9
         self.phone_detector = None
         phone_path = root / "phone_detector_v5.pt"
         if phone_path.is_file():
@@ -109,6 +172,10 @@ class Vision:
     def close(self):
         if hasattr(self, 'face_worker'):
             self.face_worker.shutdown(wait=True)
+        if hasattr(self, 'phone_worker'):
+            self.phone_worker.shutdown(wait=True)
+        if getattr(self, 'face_mesh', None) is not None:
+            self.face_mesh.close()
         self.pose.close()
         if getattr(self, 'multi_pose', None) is not None:
             self.multi_pose.close()
@@ -163,9 +230,41 @@ class Vision:
             prediction = np.exp(prediction - prediction.max())
         return prediction / max(float(prediction.sum()), 1e-9)
 
+    def detect_phones(self, frame):
+        h, w = frame.shape[:2]
+        result = self.phone_detector.predict(frame, conf=self.settings.phone_confidence, imgsz=960, verbose=False)[0]
+        boxes = []
+        for box in result.boxes:
+            x1, y1, x2, y2 = [float(v) for v in box.xyxy[0].cpu().tolist()]
+            boxes.append(((x1 + x2) / (2 * w), (y1 + y2) / (2 * h), float(box.conf[0].cpu())))
+        return boxes
+
+    def blendshapes(self, frame, face):
+        h, w = frame.shape[:2]
+        x, y, fw, fh = (float(v) for v in face[:4])
+        pad = .35 * max(fw, fh)
+        x1, y1, x2, y2 = max(0, int(x - pad)), max(0, int(y - pad)), min(w, int(x + fw + pad)), min(h, int(y + fh + pad))
+        if x2 - x1 < 40 or y2 - y1 < 40:
+            return None
+        crop = cv2.cvtColor(frame[y1:y2, x1:x2], cv2.COLOR_BGR2RGB)
+        scale = 256 / max(crop.shape[:2])
+        if scale < 1:
+            crop = cv2.resize(crop, (round(crop.shape[1] * scale), round(crop.shape[0] * scale)))
+        result = self.face_mesh.detect(self.mp.Image(image_format=self.mp.ImageFormat.SRGB, data=np.ascontiguousarray(crop)))
+        return result.face_blendshapes[0] if result.face_blendshapes else None
+
     def process(self, frame, gallery, now=None):
         now = time.monotonic() if now is None else now
         h, w = frame.shape[:2]
+        # The phone detector is the slowest model: run it beside face/pose work and
+        # at most every phone_interval seconds, reusing the last boxes in between.
+        phone_job = None
+        if getattr(self, 'phone_detector', None) is not None and now - getattr(self, 'phone_at', -1e9) >= self.settings.phone_interval:
+            worker = getattr(self, 'phone_worker', None)
+            phone_job = worker.submit(self.detect_phones, frame) if worker else None
+            if worker is None:
+                self.phone_boxes, self.phone_at = self.detect_phones(frame), now
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         # DNN detection and pose consume the same immutable frame concurrently.
         face_job = self.face_worker.submit(self.faces, frame) if hasattr(self,'face_worker') else None
         timestamp = max(self.last_timestamp + 1, int(now * 1000))
@@ -238,6 +337,7 @@ class Vision:
                                       and now - track.head_suspicion_since >= 1.25
                                       and track.head_suspicion_samples >= 3)
             track.mouth_points=mouth_points(face,w,h)
+            mouth_motion(track, gray, face)
             if id(track) in identity_due:
                 person, score = identify(self.embedding(frame, face) if gallery else None, gallery,
                                          self.settings.face_threshold, self.settings.identity_margin)
@@ -256,6 +356,13 @@ class Vision:
                 track.identity_score, track.identity_at = score, now
                 if new_id and track.baseline:
                     track.baseline_owner = new_id
+            if id(track) in emotion_due and getattr(self, 'face_mesh', None) is not None:
+                try:
+                    shapes = self.blendshapes(frame, face)
+                    if shapes:
+                        update_drowsiness(track, shapes, now)
+                except Exception:
+                    pass
             if id(track) in emotion_due:
                 probabilities = self.predict_emotion(frame, face)
                 if probabilities is not None:
@@ -343,22 +450,18 @@ class Vision:
         for track in tracks:
             track.has_phone = False
             track.phone_confidence = 0.0
-        if self.phone_detector is not None:
-            result = self.phone_detector.predict(frame, conf=self.settings.phone_confidence,
-                                                 imgsz=960, verbose=False)[0]
-            for box in result.boxes:
-                x1, y1, x2, y2 = [float(v) for v in box.xyxy[0].cpu().tolist()]
-                cx, cy = (x1 + x2) / (2 * w), (y1 + y2) / (2 * h)
-                confidence = float(box.conf[0].cpu())
-                candidates = []
-                for track in tracks:
-                    points = [p for p in track.landmarks if len(p) >= 4 and p[3] >= .25]
-                    if len(points) < 4:
-                        continue
-                    px, py = [p[0] for p in points], [p[1] for p in points]
-                    if min(px) - .06 <= cx <= max(px) + .06 and min(py) - .04 <= cy <= max(py) + .04:
-                        candidates.append(track)
-                if len(candidates) == 1 and confidence > candidates[0].phone_confidence:
-                    candidates[0].has_phone = True
-                    candidates[0].phone_confidence = confidence
+        if phone_job is not None:
+            self.phone_boxes, self.phone_at = phone_job.result(), now
+        for cx, cy, confidence in getattr(self, 'phone_boxes', []):
+            candidates = []
+            for track in tracks:
+                points = [p for p in track.landmarks if len(p) >= 4 and p[3] >= .25]
+                if len(points) < 4:
+                    continue
+                px, py = [p[0] for p in points], [p[1] for p in points]
+                if min(px) - .06 <= cx <= max(px) + .06 and min(py) - .04 <= cy <= max(py) + .04:
+                    candidates.append(track)
+            if len(candidates) == 1 and confidence > candidates[0].phone_confidence:
+                candidates[0].has_phone = True
+                candidates[0].phone_confidence = confidence
         return tracks, len(all_faces) > self.settings.max_people

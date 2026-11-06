@@ -4,15 +4,15 @@
   const EVENT_NAMES = {
     phone: 'VẬT THỂ · ĐIỆN THOẠI', head_turning: 'HƯỚNG MẶT · QUAY ĐẦU KÉO DÀI', standing: 'TƯ THẾ · NHỔM DẬY',
     head_down: 'TƯ THẾ · CÚI XUỐNG', moving: 'CHUYỂN ĐỘNG · RỜI CHỖ', arm_raise: 'TƯ THẾ · GÓC TAY TĂNG',
-    body_lean: 'TƯ THẾ · NGẢ NGƯỜI', negative_emotion: 'CẢM XÚC TIÊU CỰC ≥ 20 GIÂY', proctor_dwell: 'NHẮC GIÁM THỊ · ĐỨNG LÂU CẠNH BÀN',
+    body_lean: 'TƯ THẾ · NGẢ NGƯỜI', negative_emotion: 'CẢM XÚC TIÊU CỰC ≥ 20 GIÂY', tired: 'HỖ TRỢ · DẤU HIỆU MỆT MỎI', proctor_dwell: 'NHẮC GIÁM THỊ · ĐỨNG LÂU CẠNH BÀN',
   };
   const SHORT = {
     phone: 'Điện thoại', head_turning: 'Quay đầu', standing: 'Nhổm dậy', head_down: 'Cúi xuống', moving: 'Rời chỗ',
-    arm_raise: 'Giơ tay', body_lean: 'Ngả người', negative_emotion: 'Cảm xúc tiêu cực', proctor_dwell: 'Giám thị đứng lâu',
+    arm_raise: 'Giơ tay', body_lean: 'Ngả người', negative_emotion: 'Cảm xúc tiêu cực', tired: 'Mệt mỏi', proctor_dwell: 'Giám thị đứng lâu',
   };
   const CATEGORIES = ['Sử dụng điện thoại', 'Nhìn bài / trao đổi', 'Rời khỏi chỗ', 'Nói chuyện', 'Sử dụng tài liệu',
     'Hỗ trợ thí sinh (sức khỏe, tâm lý)', 'Giám thị đứng lâu cạnh bàn', 'Khác'];
-  const DEFAULT_CATEGORY = { phone: 0, head_turning: 1, body_lean: 1, arm_raise: 1, standing: 2, moving: 2, head_down: 1, negative_emotion: 5, proctor_dwell: 6 };
+  const DEFAULT_CATEGORY = { phone: 0, head_turning: 1, body_lean: 1, arm_raise: 1, standing: 2, moving: 2, head_down: 1, negative_emotion: 5, tired: 5, proctor_dwell: 6 };
   const DECISION = { violation: 'Xác nhận vi phạm', warning: 'Nhắc nhở', dismissed: 'Không vi phạm' };
   const MOOD = { normal: ['Bình thường', '#2f9e74'], anxious: ['Lo lắng', '#e0a030'], tired: ['Mệt mỏi', '#7b6fd6'], sad: ['Buồn', '#d2554f'] };
   window.examwatchEventNames = EVENT_NAMES;
@@ -164,13 +164,20 @@
   // ---------- #6 speech search ----------
   async function loadSpeech() {
     const q = $('sp-q').value.trim();
-    const rows = await api('/api/transcripts?' + new URLSearchParams({ q, session_id: $('sp-session').value }));
-    $('sp-rows').innerHTML = rows.length ? rows.map((t) => `<div class="speech-row"><div><time>${esc(t.session_title)} · ${duration(t.start_seconds)} — ${duration(t.end_seconds)}</time><p>${highlight(t.text, q)}</p></div>
+    const rows = await api('/api/transcripts?' + new URLSearchParams({ q, session_id: $('sp-session').value, speaker: $('sp-speaker').value }));
+    $('sp-rows').innerHTML = rows.length ? rows.map((t) => `<div class="speech-row"><div><time>${esc(t.session_title)} · ${duration(t.start_seconds)} — ${duration(t.end_seconds)}</time>
+      <span class="speaker ${t.speaker_name ? '' : 'unknown'}">${t.speaker_name ? `${highlight(t.speaker_name, q)} <small>ước tính ${Math.round((t.speaker_score || 0) * 100)}%</small>` : 'Chưa xác định người nói'}</span><p>${highlight(t.text, q)}</p></div>
       ${t.has_audio ? `<audio controls preload="none" src="/api/transcripts/${t.id}/audio"></audio>` : '<span class="tag">Không lưu âm thanh</span>'}</div>`).join('')
       : `<div class="empty compact">${q ? 'Không tìm thấy lời nói chứa từ khóa này.' : 'Chưa có bản chép lời.'}</div>`;
   }
   const reloadSpeech = debounce(() => loadSpeech().catch((e) => notice(e.message)));
-  ['sp-q', 'sp-session'].forEach((id) => $(id).addEventListener('input', reloadSpeech));
+  ['sp-q', 'sp-session', 'sp-speaker'].forEach((id) => $(id).addEventListener('input', reloadSpeech));
+  async function fillSpeakers() {
+    const people = await api('/api/speakers');
+    const current = $('sp-speaker').value;
+    $('sp-speaker').innerHTML = '<option value="">Tất cả người nói</option><option value="unknown">Chưa xác định</option>' + people.map((p) => `<option value="${esc(p.id)}">${esc(p.name)} (${p.lines})</option>`).join('');
+    $('sp-speaker').value = [...$('sp-speaker').options].some((o) => o.value === current) ? current : '';
+  }
 
   // ---------- #1 shift report ----------
   $('report-close').addEventListener('click', () => $('report-dialog').close());
@@ -210,7 +217,7 @@
   // ---------- page hooks ----------
   window.examwatchPage = (page) => {
     if (page === 'incidents') fillSessions($('inc-session')).then(loadIncidents).catch((e) => notice(e.message));
-    if (page === 'speech') fillSessions($('sp-session')).then(loadSpeech).catch((e) => notice(e.message));
+    if (page === 'speech') Promise.all([fillSessions($('sp-session')), fillSpeakers()]).then(loadSpeech).catch((e) => notice(e.message));
     if (page === 'settings') loadDetection().catch((e) => notice(e.message));
   };
 })();

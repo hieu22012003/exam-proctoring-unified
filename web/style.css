@@ -147,3 +147,5 @@ mark{background:#ffe8a3;border-radius:3px;padding:0 2px}
 .incident-table{width:100%;border-collapse:collapse}.incident-table th{padding:11px 12px;text-align:left;font-size:11px;letter-spacing:.04em;color:#5d7584;background:#f5f9fa;border-bottom:1px solid #e3ecef}
 .incident-table td{padding:10px 12px;border-bottom:1px solid #edf2f4;font-size:13px}.incident-table td b{font-size:14px}
 .decision-group label{white-space:nowrap;flex:0 0 auto}.decision-group label input{margin:0}
+.speaker{display:inline-block;margin:4px 0 0;padding:3px 8px;border-radius:999px;background:#e8f1fb;color:#2f5fb3;font-size:11px;font-weight:650}
+.speaker small{font-weight:500;color:#6c85a6}.speaker.unknown{background:#f0f3f5;color:#7a8e99}

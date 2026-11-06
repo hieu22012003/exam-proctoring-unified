@@ -61,6 +61,10 @@ class Track:
     head_alert_at: float = -1e9
     role: str = "student"
     tired: bool = False
+    drowsy: bool = False
+    perclos: float = 0.0
+    yawns: int = 0
+    mouth_activity: float = 0.0
     head_down_rule: Sustained = field(default_factory=lambda: Sustained(5))
     moving_rule: Sustained = field(default_factory=lambda: Sustained(3))
     tired_rule: Sustained = field(default_factory=lambda: Sustained(20))

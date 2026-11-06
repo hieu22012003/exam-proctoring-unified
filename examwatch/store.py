@@ -14,7 +14,7 @@ MIGRATIONS = {
     "sessions": [("roster", "TEXT")],
     "alerts": [("category", "TEXT"), ("decision", "TEXT"), ("note", "TEXT"), ("reviewer", "TEXT"),
                ("reviewed_at", "TEXT"), ("signature", "TEXT"), ("thumbnail", "TEXT")],
-    "transcripts": [("audio", "TEXT")],
+    "transcripts": [("audio", "TEXT"), ("speaker_id", "TEXT"), ("speaker_name", "TEXT"), ("speaker_score", "REAL")],
     "observations": [("mood", "TEXT")],
 }
 DECISIONS = {"violation": "Xác nhận vi phạm", "warning": "Nhắc nhở", "dismissed": "Không vi phạm"}
@@ -251,28 +251,41 @@ class Store:
             r = db.execute("SELECT * FROM alerts WHERE id=?", (alert_id,)).fetchone()
         return dict(r) if r else None
 
-    def add_transcript(self, session_id, start, end, text, audio=None):
+    def add_transcript(self, session_id, start, end, text, audio=None, speaker=None):
+        speaker = speaker or {}
         row = {"id": uuid.uuid4().hex, "session_id": session_id, "start_seconds": start,
-               "end_seconds": end, "text": text, "created_at": utc_now(), "audio": audio}
+               "end_seconds": end, "text": text, "created_at": utc_now(), "audio": audio,
+               "speaker_id": speaker.get("id"), "speaker_name": speaker.get("name"), "speaker_score": speaker.get("score")}
         with self.connection() as db:
-            db.execute("INSERT INTO transcripts (id,session_id,start_seconds,end_seconds,text,created_at,audio) VALUES (?,?,?,?,?,?,?)",
-                       (row["id"], session_id, start, end, text, row["created_at"], audio))
+            db.execute("""INSERT INTO transcripts (id,session_id,start_seconds,end_seconds,text,created_at,audio,
+                speaker_id,speaker_name,speaker_score) VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                       (row["id"], session_id, start, end, text, row["created_at"], audio,
+                        row["speaker_id"], row["speaker_name"], row["speaker_score"]))
         self.cloud.enqueue("set", "transcripts", row["id"], row)
         return row
 
-    def search_transcripts(self, q="", session_id="", limit=500):
+    def search_transcripts(self, q="", session_id="", limit=500, speaker=""):
         sql = "SELECT t.*, s.title AS session_title, s.started_at AS session_started FROM transcripts t JOIN sessions s ON s.id=t.session_id"
         args = []
-        if session_id: sql += " WHERE t.session_id=?"; args.append(session_id)
+        clauses = []
+        if session_id: clauses.append("t.session_id=?"); args.append(session_id)
+        if speaker == "unknown": clauses.append("t.speaker_name IS NULL")
+        elif speaker: clauses.append("t.speaker_id=?"); args.append(speaker)
+        if clauses: sql += " WHERE " + " AND ".join(clauses)
         sql += " ORDER BY s.started_at DESC, t.start_seconds DESC LIMIT ?"; args.append(5000)
         with self.connection() as db:
             rows = [dict(r) for r in db.execute(sql, args)]
         if q:
             needle = fold(q)
-            rows = [r for r in rows if needle in fold(r["text"])]
+            rows = [r for r in rows if needle in fold(r["text"] + " " + (r.get("speaker_name") or ""))]
         for r in rows:
             r["has_audio"] = bool(r.get("audio") and (self.directory / "evidence" / r["audio"]).is_file())
         return rows[:max(1, min(int(limit), 5000))]
+
+    def speakers(self):
+        with self.connection() as db:
+            return [dict(r) for r in db.execute("""SELECT speaker_id AS id, MAX(speaker_name) AS name, COUNT(*) AS lines
+                FROM transcripts WHERE speaker_id IS NOT NULL GROUP BY speaker_id ORDER BY name""")]
 
     def transcript_audio(self, transcript_id):
         with self.connection() as db:

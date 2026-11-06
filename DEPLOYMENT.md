@@ -42,6 +42,10 @@ Create a service from this GitHub repository. Railway detects the root `Dockerfi
 | `EXAMWATCH_POSE_IMGSZ` | Optional, default `800`: YOLO pose input size; lower (640) is faster, higher sees farther rows |
 | `EXAMWATCH_FRAME_WIDTH` / `EXAMWATCH_DETECTOR_WIDTH` | Optional, defaults `1280` / `960`: camera frame and face-detector width for a full classroom |
 
+| `EXAMWATCH_PHONE_INTERVAL` | Optional, default `0.5`: seconds between phone-detector passes (runs beside face/pose work; boxes reused in between) |
+
+Speaker attribution: each transcript line is assigned to the person whose mouth region moved most (relative to their eye band) while it was spoken, when that person is clearly ahead of the next; otherwise it stays "not identified". Tiredness uses MediaPipe face blendshapes (`face_landmarker.task`, fetched at startup): eyes closed in at least 35 % of samples over a minute (PERCLOS) or two yawns, or a long bowed head.
+
 Classroom scale: with 25 people the backend runs one YOLO pose pass for every body and refreshes at most 4 face identities and 6 emotions per frame (round robin), so a 2 vCPU service analyses roughly 1–2 frames per second. Register proctors on the Students page with the role "Giám thị" so they are excluded from alerts and attendance and reminded after standing beside one desk longer than the configured time.
 
 Google sign-in: enable the Google provider in Firebase Authentication → Sign-in method, and add every Vercel domain the app is served from to Authentication → Settings → Authorized domains.

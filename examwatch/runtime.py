@@ -25,6 +25,8 @@ class Runtime:
             self.settings.standing_seconds=saved_seconds
         self._apply_detection(self.store.setting('detection', {}) or {})
         self.dwell = {}
+        from collections import deque
+        self.speaking = deque(maxlen=20000)  # (offset, track id, student id, name, role, mouth activity)
         self.vision_factory, self.speech_factory = vision_factory, speech_factory
         self.vision = self.speech = None
         self.session = None
@@ -273,8 +275,18 @@ class Runtime:
                 if track.moving_rule.update(track.posture == "moving", now):
                     events.append(("moving", "Thí sinh rời khỏi vị trí ngồi đã hiệu chuẩn; cần giám thị kiểm tra."))
                 # Bowed head held for a long time with a flat/sad face reads as tiredness.
-                track.tired = track.tired_rule.update(track.posture == "head_down" and track.emotion in {"neutral", "sad", "unknown"}, now) \
+                # Tired: eyes closed a large share of the last minute / repeated yawns
+                # (face blendshapes), or the head bowed for a long time with a flat face.
+                bowed = track.tired_rule.update(track.posture == "head_down" and track.emotion in {"neutral", "sad", "unknown"}, now) \
                     or (track.tired and track.posture == "head_down")
+                track.tired = bool(track.drowsy or bowed)
+                if track.tired and not getattr(track, 'tired_alerted', False):
+                    track.tired_alerted = True
+                    reason = (f"mắt nhắm {track.perclos * 100:.0f}% thời gian trong 1 phút" if track.perclos >= .35 else
+                              f"ngáp {track.yawns} lần" if track.yawns >= 2 else "cúi gục kéo dài")
+                    events.append(("tired", f"Dấu hiệu mệt mỏi ({reason}); cân nhắc hỏi thăm, hỗ trợ thí sinh."))
+                elif not track.tired:
+                    track.tired_alerted = False
                 negative = (track.emotion in {"sad", "angry", "fear"}
                             and track.emotion_score >= self.settings.emotion_confidence)
                 if track.emotion_rule.update(negative, now):
@@ -287,6 +299,8 @@ class Runtime:
                     self.store.observe(self.session["id"], track, offset)
                     track.observed_at = now
             self._proctor_dwell(tracks, offset, now, frame)
+            for t in tracks:
+                self.speaking.append((offset, t.id, t.student_id, t.name, t.role, t.mouth_activity))
             self.visible, self.last_frame = tracks, now
             self.inference_ms = round((now - started) * 1000)
             return {"tracks": [self.serialize(t, now) for t in tracks], "overflow": overflow,
@@ -373,7 +387,8 @@ class Runtime:
                 "lean_target": t.angles.get('lean_target'),
                 "pose_flags": [key for key,rule in [('left_arm',t.left_arm_rule),('right_arm',t.right_arm_rule),('lean',t.lean_rule)] if rule.flagged],
                 "standing_seconds": round(t.standing_rule.elapsed(now), 1),
-                "role": t.role, "tired": t.tired,
+                "role": t.role, "tired": t.tired, "drowsy": t.drowsy, "perclos": round(t.perclos, 2),
+                "mouth_activity": round(t.mouth_activity, 2),
                 "dwell_seconds": getattr(t, "dwell_seconds", 0), "dwell_student": getattr(t, "dwell_student", None),
                 "negative_seconds": round(t.emotion_rule.elapsed(now), 1)}
 
@@ -402,8 +417,9 @@ class Runtime:
             try:
                 for segment in self.speech.transcribe(samples, rate):
                     audio = self._save_clip(samples, rate, segment) if self.settings.evidence_audio else None
-                    self.store.add_transcript(session_id, offset + segment["start"],
-                                              offset + segment["end"], segment["text"], audio)
+                    start, end = offset + segment["start"], offset + segment["end"]
+                    speaker = self.attribute_speaker(start, end)
+                    self.store.add_transcript(session_id, start, end, segment["text"], audio, speaker)
                 self.audio_error = None
             except Exception as exc:
                 logger.exception("Audio transcription failed")
@@ -411,6 +427,26 @@ class Runtime:
             finally:
                 self.audio_busy = False
                 self.audio.task_done()
+
+    def attribute_speaker(self, start, end):
+        """Person whose mouth moved most while the segment was spoken, if clearly ahead."""
+        with self.lock:
+            window = [e for e in self.speaking if start - .4 <= e[0] <= end + .4]
+        per = {}
+        for _, track_id, student_id, name, role, activity in window:
+            item = per.setdefault(track_id, [0.0, 0, student_id, name, role])
+            item[0] += activity; item[1] += 1
+            if student_id: item[2], item[3] = student_id, name
+        ranked = sorted(((total / count, sid, name, role) for total, count, sid, name, role in per.values() if count),
+                        key=lambda r: r[0], reverse=True)
+        if not ranked or ranked[0][0] < self.settings.speak_threshold:
+            return None
+        second = ranked[1][0] if len(ranked) > 1 else 0.0
+        if second and ranked[0][0] < second * 1.4:
+            return None
+        best = ranked[0]
+        return {"id": best[1], "name": ("Giám thị " if best[3] == "proctor" else "") + best[2],
+                "score": round(best[0] / (best[0] + second), 2) if best[0] + second else 1.0}
 
     def _save_clip(self, samples, rate, segment):
         import wave
