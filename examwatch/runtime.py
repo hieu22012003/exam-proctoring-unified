@@ -54,8 +54,21 @@ class Runtime:
 
     def _download_phone_model(self):
         phone_path = self.settings.models / "phone_detector_v5.pt"
+        if phone_path.is_file():
+            return
+        # The checkpoint ships in the image (models/ in the repo); copy it into the
+        # persistent model directory, falling back to Firebase Storage if absent.
+        from .config import ROOT
+        bundled = ROOT / "models" / "phone_detector_v5.pt"
+        if bundled.is_file() and bundled.resolve() != phone_path.resolve():
+            import shutil
+            phone_path.parent.mkdir(parents=True, exist_ok=True)
+            temporary = phone_path.with_name(phone_path.name + ".copy")
+            shutil.copyfile(bundled, temporary)
+            temporary.replace(phone_path)
+            return
         gcs_path = os.getenv("EXAMWATCH_PHONE_MODEL_GCS_PATH", "").strip()
-        if not phone_path.is_file() and gcs_path:
+        if gcs_path:
             self.store.cloud.download_model(gcs_path, phone_path)
 
     def configure_standing(self, seconds):

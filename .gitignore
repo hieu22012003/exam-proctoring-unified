@@ -12,6 +12,7 @@ secrets/
 !.env.example
 models/**/*.onnx
 models/**/*.pt
+!models/phone_detector_v5.pt
 models/**/*.task
 models/**/*.tflite
 models/**/*.bin
