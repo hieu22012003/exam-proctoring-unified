@@ -42,6 +42,21 @@ class Settings:
     identity_budget: int = 4          # face embeddings per frame when many people are visible
     emotion_budget: int = 6
     whisper_name: str = "zipformer-vi-30m"
+    # Fine-grained proctor settings (feedback 2026-11-08). sensitivity still sets
+    # the base thresholds above; values in Settings.advanced override them.
+    head_seconds: float = 1.25        # yaw beyond head_yaw for this long = turning
+    lean_hold_seconds: float = 2.0
+    standing_rise: float = 0.5        # head rise needed for 'standing', in face heights
+    stand_seconds: float = 1.5        # 'standing' held this long (head_down/moving keep standing_seconds)
+    auto_calibrate: bool = True       # take the seated reference when someone holds still ~3 s
+    phone_confirm_seconds: float = 1.0
+    alert_cooldown: float = 6.0
+    advanced: dict = None             # explicit overrides saved by the proctor
+    enabled: dict = None              # alert kind -> on/off
+    warmup: bool = True
+
+    def rule_on(self, kind):
+        return (self.enabled or {}).get(kind, True)
 
     @classmethod
     def load(cls):
@@ -61,4 +76,62 @@ class Settings:
             pose_engine=os.getenv("EXAMWATCH_POSE_ENGINE", "mediapipe" if LITE else "auto").strip().lower(),
             yolo_imgsz=max(320, min(1280, int(os.getenv("EXAMWATCH_POSE_IMGSZ", "800")))),
             phone_interval=max(0.0, min(5.0, float(os.getenv("EXAMWATCH_PHONE_INTERVAL", "0.5")))),
+            warmup=os.getenv("EXAMWATCH_WARMUP", "1").strip() != "0",
         )
+
+
+# Proctor-adjustable values: key -> (min, max, default, group, label, help).
+# The settings page renders its form from this table (GET /api/settings/detection).
+ADVANCED = {
+    "phone_confidence":      (.20, .90, None, "phone", "Độ tin cậy tối thiểu",
+                              "Cao hơn: ít báo nhầm (thước, máy tính cầm tay) nhưng dễ bỏ sót."),
+    "phone_confirm_seconds": (0, 6, 1.0, "phone", "Phải thấy liên tục (giây)",
+                              "Điện thoại phải xuất hiện liên tục chừng này mới cảnh báo."),
+    "head_yaw":              (.15, .80, None, "head", "Độ lệch mặt",
+                              "Mũi lệch khỏi giữa hai mắt/tai. Nhỏ hơn = nhạy hơn."),
+    "head_seconds":          (.5, 10, 1.25, "head", "Giữ quay mặt (giây)", ""),
+    "lean_threshold":        (8, 45, None, "body", "Góc nghiêng thân (độ)", ""),
+    "lean_hold_seconds":     (.5, 10, 2.0, "body", "Giữ nghiêng (giây)", ""),
+    "arm_threshold":         (20, 120, None, "body", "Góc tay so với thân (độ)", ""),
+    "standing_rise":         (.2, 1.5, .5, "standing", "Độ nâng đầu (× chiều cao mặt)",
+                              "0,5 = đầu nâng lên nửa khuôn mặt so với lúc ngồi."),
+    "stand_seconds":         (.5, 60, 1.5, "standing", "Giữ nhổm dậy (giây)", ""),
+    "negative_seconds":      (5, 300, 20.0, "other", "Cảm xúc tiêu cực kéo dài (giây)", ""),
+    "alert_cooldown":        (2, 120, 6.0, "other", "Giãn cách 2 cảnh báo cùng loại (giây)", ""),
+}
+# None default = taken from the sensitivity slider.
+
+ALERT_KINDS = {
+    "phone": "Điện thoại", "head_turning": "Quay mặt / nhìn bài", "body_lean": "Nghiêng thân",
+    "arm_raise": "Giơ / vươn tay", "standing": "Nhổm dậy", "head_down": "Cúi xuống",
+    "moving": "Rời chỗ", "negative_emotion": "Cảm xúc tiêu cực", "tired": "Mệt mỏi",
+    "proctor_dwell": "Giám thị đứng lâu cạnh bàn",
+}
+
+ADVANCED_GROUPS = {"phone": "Điện thoại", "head": "Quay mặt / nhìn bài", "body": "Nghiêng người & tay",
+                   "standing": "Nhổm dậy", "other": "Khác"}
+
+
+def validate_advanced(values):
+    clean = {}
+    for key, value in (values or {}).items():
+        if key not in ADVANCED:
+            raise ValueError(f"Không có thông số '{key}'.")
+        low, high, _, _, label, _ = ADVANCED[key]
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError(f"{label}: cần là số.")
+        if not low <= float(value) <= high:
+            raise ValueError(f"{label}: phải từ {low:g} đến {high:g}.")
+        clean[key] = float(value)
+    return clean
+
+
+def validate_enabled(values):
+    clean = {}
+    for key, value in (values or {}).items():
+        if key not in ALERT_KINDS:
+            raise ValueError(f"Không có loại cảnh báo '{key}'.")
+        if not isinstance(value, bool):
+            raise ValueError(f"{ALERT_KINDS[key]}: cần bật/tắt.")
+        clean[key] = value
+    return clean

@@ -1,6 +1,6 @@
 from dataclasses import dataclass, field
 import numpy as np
-from .rules import Sustained, AngleWatch
+from .rules import Sustained, AngleWatch, Persistence, AutoBaseline
 
 
 def iou(a, b):
@@ -53,12 +53,19 @@ class Track:
     has_phone: bool = False
     phone_confidence: float = 0.0
     phone_alert_at: float = -1e9
+    phone_seen: bool = False          # a box this frame, not yet confirmed
+    phone_rule: Persistence = field(default_factory=lambda: Persistence(1.0))
     head_turning: bool = False
     head_yaw: float = 0.0
-    head_suspicion_since: float | None = None
-    head_suspicion_last: float = -1e9
-    head_suspicion_samples: int = 0
+    head_source: str | None = None    # 'face' (YuNet) or 'pose' (ears/eyes)
+    # Tolerates 2.5 s between frames. The old counter restarted whenever two frames
+    # were > 0.75 s apart, so on a slow host head turning could never be confirmed.
+    head_rule: Sustained = field(default_factory=lambda: Sustained(1.25))
     head_alert_at: float = -1e9
+    lean_alert_at: float = -1e9
+    arm_alert_at: float = -1e9
+    baseline_auto: bool = False
+    auto_baseline: AutoBaseline = field(default_factory=AutoBaseline)
     role: str = "student"
     tired: bool = False
     drowsy: bool = False
@@ -76,6 +83,8 @@ class Track:
         if not preserve_baseline:
             self.baseline = None
             self.baseline_owner = None
+            self.baseline_auto = False
+            self.auto_baseline.reset()
         self.probabilities = None
         self.emotion, self.emotion_score = "unknown", 0
         self.emotion_rule.reset()
@@ -87,12 +96,16 @@ class Track:
 
 
 def apply_thresholds(track, settings):
-    track.standing_rule.seconds = settings.standing_seconds
+    track.standing_rule.seconds = settings.stand_seconds
     track.head_down_rule.seconds = settings.standing_seconds
     track.moving_rule.seconds = max(2.0, settings.standing_seconds / 2)
     track.emotion_rule.seconds = settings.negative_seconds
+    track.head_rule.seconds = settings.head_seconds
+    track.phone_rule.seconds = settings.phone_confirm_seconds
+    track.phone_rule.max_gap = max(1.6, settings.phone_interval * 2.5)
     track.left_arm_rule.threshold = track.right_arm_rule.threshold = settings.arm_threshold
     track.lean_rule.threshold = settings.lean_threshold
+    track.lean_rule.hold_seconds = settings.lean_hold_seconds
 
 
 class Tracker:

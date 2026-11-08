@@ -11,6 +11,11 @@ from .store import Store
 from .clips import EvidenceClips
 from .rules import body_angles, Sustained, sensitivity_thresholds
 from .tracking import apply_thresholds
+from .config import ADVANCED, ADVANCED_GROUPS, ALERT_KINDS, validate_advanced, validate_enabled
+
+
+def side(sign):
+    return 'trái' if sign < 0 else 'phải'
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +50,7 @@ class Runtime:
         self.capture_id = None
         self.last_audio_end = 0
         self.gallery = []
+        self.warm_state = 'idle'
 
     def model_status(self):
         paths = {"face_detector": "yunet.onnx", "identity": "sface.onnx",
@@ -108,6 +114,23 @@ class Runtime:
             s.sensitivity = saved['sensitivity']
         for key, value in sensitivity_thresholds(s.sensitivity).items():
             setattr(s, key, value)
+        if isinstance(saved.get('advanced'), dict):
+            try:
+                s.advanced = validate_advanced(saved['advanced'])
+            except ValueError:
+                logger.warning("Ignoring invalid saved advanced settings: %s", saved['advanced'])
+        for key, (_, _, default, *_rest) in ADVANCED.items():
+            if key in (s.advanced or {}):
+                setattr(s, key, (s.advanced or {})[key])
+            elif default is not None:
+                setattr(s, key, default)
+        if isinstance(saved.get('enabled'), dict):
+            try:
+                s.enabled = validate_enabled(saved['enabled'])
+            except ValueError:
+                logger.warning("Ignoring invalid saved alert toggles: %s", saved['enabled'])
+        if isinstance(saved.get('auto_calibrate'), bool):
+            s.auto_calibrate = saved['auto_calibrate']
         evidence = saved.get('evidence') or {}
         for kind in ('image', 'video', 'audio'):
             if isinstance(evidence.get(kind), bool):
@@ -121,18 +144,38 @@ class Runtime:
         return {'standing_threshold_seconds': s.standing_seconds, 'sensitivity': s.sensitivity,
                 'evidence': {'image': s.evidence_image, 'video': s.evidence_video, 'audio': s.evidence_audio},
                 'proctor_dwell_seconds': s.proctor_dwell_seconds,
-                'thresholds': sensitivity_thresholds(s.sensitivity), 'max_people': s.max_people}
+                'thresholds': sensitivity_thresholds(s.sensitivity), 'max_people': s.max_people,
+                'advanced': {k: round(float(getattr(s, k)), 3) for k in ADVANCED},
+                'overridden': sorted((s.advanced or {}).keys()),
+                'enabled': {k: s.rule_on(k) for k in ALERT_KINDS},
+                'auto_calibrate': s.auto_calibrate,
+                'schema': [{'key': k, 'min': lo, 'max': hi, 'group': g, 'label': label, 'help': help_text}
+                           for k, (lo, hi, _, g, label, help_text) in ADVANCED.items()],
+                'groups': ADVANCED_GROUPS, 'kinds': ALERT_KINDS}
 
-    def configure_detection(self, sensitivity, evidence, proctor_dwell_seconds, standing_seconds):
+    def configure_detection(self, sensitivity, evidence, proctor_dwell_seconds, standing_seconds,
+                            advanced=None, enabled=None, auto_calibrate=None):
+        """advanced: explicit overrides ({} clears them so the slider decides again);
+        None keeps what was saved. Same for enabled / auto_calibrate."""
         if type(sensitivity) is not int or not 0 <= sensitivity <= 100:
             raise ValueError('Độ nhạy phải là số nguyên từ 0 đến 100.')
         if type(proctor_dwell_seconds) is not int or not 10 <= proctor_dwell_seconds <= 1800:
             raise ValueError('Thời gian nhắc giám thị phải từ 10 đến 1800 giây.')
         if not all(isinstance(evidence.get(k), bool) for k in ('image', 'video', 'audio')):
             raise ValueError('Tham số bằng chứng không hợp lệ.')
+        advanced = validate_advanced(advanced) if advanced is not None else None
+        enabled = validate_enabled(enabled) if enabled is not None else None
+        if auto_calibrate is not None and not isinstance(auto_calibrate, bool):
+            raise ValueError('Tự hiệu chuẩn: cần bật/tắt.')
         with self.lock:
+            previous = self.store.setting('detection', {}) or {}
             saved = {'sensitivity': sensitivity, 'evidence': {k: evidence[k] for k in ('image', 'video', 'audio')},
-                     'proctor_dwell_seconds': proctor_dwell_seconds}
+                     'proctor_dwell_seconds': proctor_dwell_seconds,
+                     'advanced': advanced if advanced is not None else previous.get('advanced', {}),
+                     'enabled': enabled if enabled is not None else previous.get('enabled', {}),
+                     'auto_calibrate': auto_calibrate if auto_calibrate is not None
+                     else previous.get('auto_calibrate', True)}
+            self.settings.advanced, self.settings.enabled = {}, {}
             self.store.set_setting('detection', saved)
             self._apply_detection(saved)
         self.configure_standing(standing_seconds)
@@ -142,7 +185,79 @@ class Runtime:
                 targets += list(self.vision.tracker.tracks.values())
             for track in {id(t): t for t in targets}.values():
                 apply_thresholds(track, self.settings)
+            if self.vision is not None and hasattr(self.vision, 'phone_at'):
+                self.vision.phone_at = -1e9  # rescan with the new confidence
         return self.detection_settings()
+
+    def warmup(self):
+        """Load the face/emotion models (and speech) at boot, so 'Bắt đầu phiên'
+        does not wait for them on a cold Render instance."""
+        self.warm_state = 'loading'
+        try:
+            with self.lock:  # never race start()/enrollment into a second model copy
+                if self.session:
+                    self.warm_state = 'ready'
+                    return
+                vision = self.load_vision()
+                if hasattr(vision, 'warmup'):
+                    vision.warmup()
+                if self.speech is None and self.speech_factory is None:
+                    from .speech import Speech
+                    self.speech = Speech(self.settings)
+            self.warm_state = 'ready'
+        except Exception as exc:
+            logger.exception("Model warm-up failed (models load at session start instead)")
+            self.warm_state = f'error: {exc}'
+
+    def _pose_events(self, track, frame, now):
+        """Phone, head turning, lean and arm events for one person."""
+        s, events = self.settings, []
+        cooldown = s.alert_cooldown
+        if track.has_phone and now - track.phone_alert_at >= cooldown:
+            track.phone_alert_at = now
+            events.append(("phone", f"Phát hiện điện thoại gần {track.name} ({track.phone_confidence:.0%}), "
+                                    f"thấy liên tục ≥ {s.phone_confirm_seconds:g} giây; cần giám thị kiểm tra."))
+        h, w = frame.shape[:2]
+        anchor = track.baseline.get('abdomen_anchor') if track.baseline else None
+        angles = body_angles(track.landmarks, w, h, anchor) if anchor else body_angles(track.landmarks, w, h)
+        if track.angles.get('lean_source') != angles['lean_source']:
+            # Changing geometry reference must not look like angle growth.
+            track.left_arm_rule.reset()
+            track.right_arm_rule.reset()
+            track.lean_rule.reset()
+        track.angles = angles
+        # An automatic seat reference also needs the lean pivot, otherwise lean
+        # stays unmeasured until the proctor presses 'Hiệu chuẩn'.
+        if (track.baseline is not None and 'abdomen_anchor' not in track.baseline
+                and angles.get('lean_origin') and track.posture == 'seated'):
+            track.baseline['abdomen_anchor'] = angles['lean_origin'][:]
+        head_on = s.rule_on('head_turning')
+        looking_aside = head_on and track.head_source is not None and abs(track.head_yaw) >= .7 * s.head_yaw
+        head_dir = side(track.head_yaw)
+        if head_on and track.head_turning and now - track.head_alert_at >= cooldown:
+            track.head_alert_at = now
+            events.append(("head_turning", f"Quay mặt sang {head_dir} khung hình liên tục ≥ {s.head_seconds:g} giây "
+                                           "(có thể nhìn bài bên cạnh); cần giám thị kiểm tra."))
+        for key, rule in [('left_arm', track.left_arm_rule), ('right_arm', track.right_arm_rule), ('lean', track.lean_rule)]:
+            if not rule.update(angles[key], now):
+                continue
+            if key == 'lean':
+                if looking_aside:
+                    # Turning to read a neighbour's paper tilts the torso too: report
+                    # one 'looking aside' event instead of a separate body lean.
+                    if now - track.head_alert_at >= cooldown:
+                        track.head_alert_at = now
+                        events.append(("head_turning", f"Quay mặt sang {head_dir} kèm nghiêng người {rule.value:.0f}° "
+                                                       "(có thể nhìn bài bên cạnh); cần giám thị kiểm tra."))
+                elif now - track.lean_alert_at >= cooldown:
+                    track.lean_alert_at = now
+                    events.append(('body_lean', f'Nghiêng thân sang {side(angles.get("lean_side", 1))} '
+                                                f'{rule.value:.1f}°; dấu hiệu tư thế cần giám thị kiểm tra.'))
+            elif now - track.arm_alert_at >= cooldown:
+                track.arm_alert_at = now
+                label = 'Tay trái' if key == 'left_arm' else 'Tay phải'
+                events.append(('arm_raise', f'{label}: góc {rule.value:.1f}°; dấu hiệu tư thế cần giám thị kiểm tra.'))
+        return events
 
     def load_vision(self):
         if self.vision is None:
@@ -253,34 +368,16 @@ class Runtime:
         try:
             self.require_owner(owner, capture_id)
             started = time.monotonic()
-            tracks, overflow = self.vision.process(frame, self.gallery)
+            result = self.vision.process(frame, self.gallery)
+            tracks, overflow = result[0], result[1]
+            phones = result[2] if len(result) > 2 else []
             now = time.monotonic()
             offset = now - self.started
             self.clips.push(frame, now)
             for track in tracks:
-                events = []
-                if track.has_phone and now - track.phone_alert_at >= 6:
-                    track.phone_alert_at = now
-                    events.append(("phone", f"Phát hiện điện thoại gần Track {track.id}; cần giám thị kiểm tra."))
-                if track.head_turning and now - track.head_alert_at >= 6:
-                    track.head_alert_at = now
-                    events.append(("head_turning", "Hướng mặt lệch liên tục ít nhất 1,25 giây; cần giám thị kiểm tra."))
-                h, w = frame.shape[:2]
-                anchor = track.baseline.get('abdomen_anchor') if track.baseline else None
-                angles = body_angles(track.landmarks, w, h, anchor) if anchor else body_angles(track.landmarks, w, h)
-                if track.angles.get('lean_source') != angles['lean_source']:
-                    # Changing geometry reference must not look like angle growth.
-                    track.left_arm_rule.reset()
-                    track.right_arm_rule.reset()
-                    track.lean_rule.reset()
-                track.angles = angles
-                for key, rule in [('left_arm',track.left_arm_rule),('right_arm',track.right_arm_rule),('lean',track.lean_rule)]:
-                    if rule.update(angles[key], now):
-                        label = {'left_arm':'Tay trái','right_arm':'Tay phải','lean':'Nghiêng thân'}[key]
-                        kind = 'body_lean' if key=='lean' else 'arm_raise'
-                        events.append((kind, f'{label}: góc {rule.value:.1f}°; dấu hiệu tư thế cần giám thị kiểm tra.'))
+                events = self._pose_events(track, frame, now)
                 if track.standing_rule.update(track.posture == "standing", now):
-                    events.append(("standing", f"Dấu hiệu nhổm dậy kéo dài ít nhất {self.settings.standing_seconds:g} giây; cần giám thị kiểm tra."))
+                    events.append(("standing", f"Nhổm dậy khỏi ghế ≥ {self.settings.stand_seconds:g} giây; cần giám thị kiểm tra."))
                 if track.head_down_rule.update(track.posture == "head_down", now):
                     events.append(("head_down", f"Cúi xuống kéo dài ít nhất {self.settings.standing_seconds:g} giây; cần giám thị kiểm tra."))
                 if track.moving_rule.update(track.posture == "moving", now):
@@ -301,7 +398,8 @@ class Runtime:
                 negative = (track.emotion in {"sad", "angry", "fear"}
                             and track.emotion_score >= self.settings.emotion_confidence)
                 if track.emotion_rule.update(negative, now):
-                    events.append(("negative_emotion", "Biểu cảm buồn/lo lắng kéo dài ít nhất 20 giây; kiểm tra tình trạng thí sinh."))
+                    events.append(("negative_emotion", f"Biểu cảm buồn/lo lắng kéo dài ít nhất {self.settings.negative_seconds:g} giây; kiểm tra tình trạng thí sinh."))
+                events = [e for e in events if self.settings.rule_on(e[0])]
                 if track.role == "proctor":
                     events = []  # proctors are never reported as candidates
                 for kind, detail in events:
@@ -314,7 +412,7 @@ class Runtime:
                 self.speaking.append((offset, t.id, t.student_id, t.name, t.role, t.mouth_activity))
             self.visible, self.last_frame = tracks, now
             self.inference_ms = round((now - started) * 1000)
-            return {"tracks": [self.serialize(t, now) for t in tracks], "overflow": overflow,
+            return {"tracks": [self.serialize(t, now) for t in tracks], "overflow": overflow, "phones": phones,
                     "inference_ms": self.inference_ms, "offset_seconds": offset}
         finally:
             self.lock.release()
@@ -368,7 +466,7 @@ class Runtime:
             rule = self.dwell.setdefault(key, Sustained(self.settings.proctor_dwell_seconds, max_gap=4))
             rule.seconds = self.settings.proctor_dwell_seconds
             proctor.dwell_seconds, proctor.dwell_student = round(rule.elapsed(now), 1), student.name
-            if rule.update(True, now):
+            if rule.update(True, now) and self.settings.rule_on('proctor_dwell'):
                 class Marker:  # alert row describes the proctor at the candidate's desk
                     id, box, student_id = proctor.id, proctor.box, student.student_id
                     name = f"{proctor.name} · bàn {student.name}"
@@ -387,9 +485,11 @@ class Runtime:
         return {"id": t.id, "bbox": t.box, "student_id": t.student_id, "name": t.name,
                 "identity_score": round(t.identity_score, 3), "emotion": t.emotion,
                 "emotion_score": round(t.emotion_score, 3), "posture": t.posture,
-                "has_phone": t.has_phone, "phone_confidence": round(t.phone_confidence, 3),
-                "head_turning": t.head_turning, "head_yaw": round(t.head_yaw, 3),
-                "calibrated": t.baseline is not None, "landmarks": t.landmarks,
+                "has_phone": t.has_phone, "phone_seen": t.phone_seen, "phone_confidence": round(t.phone_confidence, 3),
+                "head_turning": t.head_turning, "head_yaw": round(t.head_yaw, 3), "head_source": t.head_source,
+                "head_seconds": round(t.head_rule.elapsed(now), 1),
+                "calibrated": t.baseline is not None, "calibration_auto": t.baseline_auto, "landmarks": t.landmarks,
+                "lean_threshold": round(t.lean_rule.threshold, 1),
                 "mouth_points": t.mouth_points,
                 "pose_angles": {key: round(rule.value,1) if rule.value is not None else None
                     for key,rule in [('left_arm',t.left_arm_rule),('right_arm',t.right_arm_rule),('lean',t.lean_rule)]},
@@ -483,7 +583,7 @@ class Runtime:
                 "inference_ms": self.inference_ms,
                 "camera_fresh": bool(self.session and time.monotonic() - self.last_frame < 3),
                 "max_people": self.settings.max_people, "frame_width": self.settings.frame_width,
-                "detection": self.detection_settings()}
+                "detection": self.detection_settings(), "warmup": self.warm_state}
 
     def close(self):
         self.shutdown.set()

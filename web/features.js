@@ -117,6 +117,48 @@
   const sensitivityLabel = () => { $('sensitivity-value').textContent = `${$('sensitivity').value}%`; };
   $('sensitivity').addEventListener('input', () => { sensitivityLabel(); standingSettingsDirty = true; });
   ['proctor-dwell', 'ev-image', 'ev-video', 'ev-audio'].forEach((id) => $(id).addEventListener('input', () => { standingSettingsDirty = true; }));
+  // Fine-grained values: a field the proctor edits becomes an override saved on
+  // the server; untouched ones keep following the sensitivity slider / defaults.
+  let detail = null, overridden = new Set(), draft = {};
+  const fmt = (v) => (Math.round(Number(v) * 100) / 100).toString().replace('.', ',');
+  const stepFor = (spec) => { const span = spec.max - spec.min; return span <= 3 ? 0.05 : span <= 12 ? 0.25 : 1; };
+  function renderAdvanced() {
+    if (!detail?.schema) return;
+    $('alert-toggles').innerHTML = Object.entries(detail.kinds).map(([k, label]) =>
+      `<label><input type="checkbox" data-kind="${k}" ${detail.enabled[k] !== false ? 'checked' : ''}> ${esc(label)}</label>`).join('');
+    $('auto-calibrate').checked = detail.auto_calibrate !== false;
+    $('advanced-settings').innerHTML = Object.entries(detail.groups).map(([gid, gname]) => {
+      const rows = detail.schema.filter((x) => x.group === gid).map((spec) => {
+        const v = draft[spec.key], step = stepFor(spec), touched = overridden.has(spec.key);
+        return `<label class="tunable"><span>${esc(spec.label)} <b data-out="${spec.key}">${fmt(v)}</b>${touched ? '<em>đã chỉnh</em>' : ''}</span>
+          <input type="range" data-key="${spec.key}" min="${spec.min}" max="${spec.max}" step="${step}" value="${v}">
+          <input type="number" data-key="${spec.key}" min="${spec.min}" max="${spec.max}" step="${step}" value="${v}">
+          ${spec.help ? `<small>${esc(spec.help)}</small>` : ''}</label>`;
+      }).join('');
+      return `<fieldset class="tunable-group"><legend>${esc(gname)}</legend>${rows}</fieldset>`;
+    }).join('');
+  }
+  $('advanced-settings').addEventListener('input', (e) => {
+    const key = e.target.dataset.key; if (!key) return;
+    const value = Number(e.target.value); if (!Number.isFinite(value)) return;
+    draft[key] = value; standingSettingsDirty = true;
+    const fresh = !overridden.has(key); overridden.add(key);
+    document.querySelectorAll(`#advanced-settings [data-key="${key}"]`).forEach((el) => { if (el !== e.target) el.value = value; });
+    const out = document.querySelector(`[data-out="${key}"]`);
+    if (out) { out.textContent = fmt(value); if (fresh) out.insertAdjacentHTML('afterend', '<em>đã chỉnh</em>'); }
+  });
+  $('alert-toggles').addEventListener('input', () => { standingSettingsDirty = true; });
+  $('auto-calibrate').addEventListener('input', () => { standingSettingsDirty = true; });
+  $('reset-advanced').addEventListener('click', () => {
+    overridden = new Set(); standingSettingsDirty = true;
+    $('standing-settings-status').textContent = 'Đã bỏ các ô đã chỉnh. Bấm Lưu cấu hình để dùng lại độ nhạy chung.';
+    renderAdvanced();
+  });
+  function applyDetection(d) {
+    detail = d; window.examwatchDetection = d;
+    overridden = new Set(d.overridden || []); draft = { ...(d.advanced || {}) };
+    renderAdvanced();
+  }
   async function loadDetection() {
     const d = await api('/api/settings/detection');
     if (standingSettingsDirty) return;
@@ -124,6 +166,7 @@
     $('standing-threshold').value = d.standing_threshold_seconds;
     $('proctor-dwell').value = d.proctor_dwell_seconds;
     $('ev-image').checked = d.evidence.image; $('ev-video').checked = d.evidence.video; $('ev-audio').checked = d.evidence.audio;
+    applyDetection(d);
   }
   $('save-alert-settings').addEventListener('click', async () => {
     const standing = Number($('standing-threshold').value), dwell = Number($('proctor-dwell').value);
@@ -131,9 +174,13 @@
     if (!Number.isInteger(dwell) || dwell < 10 || dwell > 1800) return notice('Thời gian nhắc giám thị: số nguyên từ 10 đến 1800 giây.');
     $('save-alert-settings').disabled = true;
     try {
+      const advanced = Object.fromEntries([...overridden].map((k) => [k, Number(draft[k])]));
+      const enabled = Object.fromEntries([...document.querySelectorAll('#alert-toggles [data-kind]')].map((el) => [el.dataset.kind, el.checked]));
       const d = await api('/api/settings/detection', json({ sensitivity: Number($('sensitivity').value), standing_threshold_seconds: standing,
-        proctor_dwell_seconds: dwell, evidence: { image: $('ev-image').checked, video: $('ev-video').checked, audio: $('ev-audio').checked } }));
+        proctor_dwell_seconds: dwell, evidence: { image: $('ev-image').checked, video: $('ev-video').checked, audio: $('ev-audio').checked },
+        advanced, enabled, auto_calibrate: $('auto-calibrate').checked }));
       standingSettingsDirty = false; standingThreshold = d.standing_threshold_seconds;
+      applyDetection(d);
       $('standing-threshold-hint').textContent = standingThreshold;
       notice(`Đã lưu cấu hình · độ nhạy ${d.sensitivity}% · giám sát ${d.standing_threshold_seconds} giây · nhắc giám thị sau ${d.proctor_dwell_seconds} giây.`);
     } catch (e) { notice(e.message); } finally { $('save-alert-settings').disabled = false; }
@@ -213,7 +260,10 @@
     }
     primed = true;
   };
-  window.examwatchStatus = (status) => { window.examwatchDwell = status.detection?.proctor_dwell_seconds || 60; };
+  window.examwatchStatus = (status) => {
+    window.examwatchDwell = status.detection?.proctor_dwell_seconds || 60;
+    if (status.detection) window.examwatchDetection = status.detection;
+  };
 
   // ---------- page hooks ----------
   window.examwatchPage = (page) => {
