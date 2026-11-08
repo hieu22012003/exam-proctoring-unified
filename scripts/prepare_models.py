@@ -27,6 +27,10 @@ ARTIFACTS = {
     "yolo11n-pose.pt": (
         "https://github.com/ultralytics/assets/releases/download/v8.3.0/yolo11n-pose.pt", 1_000_000),
 }
+# Not needed by every deployment: the 512 MB Render API (EXAMWATCH_LITE=1) never
+# loads YOLO pose, so a failed download (GitHub release assets often answer 504
+# to Render's builders) must not fail the whole build.
+OPTIONAL = {"yolo11n-pose.pt"}
 LICENSES = {
     "yunet-LICENSE.txt": "https://raw.githubusercontent.com/opencv/opencv_zoo/main/models/face_detection_yunet/LICENSE",
     "sface-LICENSE.txt": "https://raw.githubusercontent.com/opencv/opencv_zoo/main/models/face_recognition_sface/LICENSE",
@@ -77,8 +81,20 @@ def main():
     os.environ.setdefault("HF_HOME", str(ROOT / ".tmp" / "huggingface"))
     os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
     os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
+    lite = os.getenv("EXAMWATCH_LITE", "").strip() == "1"
+    wanted = {k: v for k, v in ARTIFACTS.items() if not (lite and k in OPTIONAL)}
+
+    def fetch(item):
+        try:
+            return download(folder, item)
+        except Exception as exc:
+            if item[0] not in OPTIONAL:
+                raise
+            print(f"WARNING: optional {item[0]} not downloaded ({exc}); multi-person YOLO pose disabled.", flush=True)
+            return None
+
     with ThreadPoolExecutor(max_workers=3) as pool:
-        records = list(pool.map(lambda item: download(folder, item), ARTIFACTS.items()))
+        records = [r for r in pool.map(fetch, wanted.items()) if r]
     license_folder = ROOT / "licenses"
     license_folder.mkdir(exist_ok=True)
     for name, url in LICENSES.items():
