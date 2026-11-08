@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import sys
+import time
 import urllib.request
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -48,11 +49,21 @@ def download(folder, item):
         print(f"Downloading {name}...", flush=True)
         temporary = target.with_suffix(".partial")
         request = urllib.request.Request(url, headers={"User-Agent": "ExamWatch-Local/1.0"})
-        with urllib.request.urlopen(request, timeout=120) as source, temporary.open("wb") as dest:
-            while chunk := source.read(1024 * 1024):
-                dest.write(chunk)
-        if temporary.stat().st_size < min_bytes:
-            raise RuntimeError(f"Invalid download: {name}")
+        for attempt in range(6):  # model hosts sometimes answer 5xx to build machines
+            try:
+                with urllib.request.urlopen(request, timeout=120) as source, temporary.open("wb") as dest:
+                    while chunk := source.read(1024 * 1024):
+                        dest.write(chunk)
+                if temporary.stat().st_size >= min_bytes:
+                    break
+                error = RuntimeError(f"Invalid download: {name}")
+            except Exception as exc:
+                error = exc
+            if attempt == 5:
+                raise RuntimeError(f"Could not download {name}: {error}")
+            wait = min(60, 5 * 2 ** attempt)
+            print(f"{name}: attempt {attempt + 1} failed ({error}); retrying in {wait}s", flush=True)
+            time.sleep(wait)
         temporary.replace(target)
     return {"file": name, "url": url, "bytes": target.stat().st_size, "sha256": digest(target)}
 

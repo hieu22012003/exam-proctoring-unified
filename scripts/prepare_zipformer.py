@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import tarfile
+import time
 import urllib.request
 
 ROOT=Path(__file__).resolve().parents[1]
@@ -19,10 +20,27 @@ def main():
         return
     cache=ROOT/'.tmp';cache.mkdir(exist_ok=True)
     archive=cache/'zipformer-vi-30m.tar.bz2'
-    if not archive.exists():
-        urllib.request.urlretrieve(URL,archive)
-    if hashlib.sha256(archive.read_bytes()).hexdigest()!=SHA256:
-        raise ValueError('Zipformer archive checksum mismatch; remove corrupt cached archive and retry')
+    # GitHub release downloads intermittently answer 502/504 from some build
+    # hosts (Render, Singapore): retry with backoff instead of failing the build.
+    for attempt in range(6):
+        try:
+            if not archive.exists():
+                partial=archive.with_suffix('.part')
+                request=urllib.request.Request(URL,headers={'User-Agent':'ExamWatch-Local/1.0'})
+                with urllib.request.urlopen(request,timeout=120) as source, open(partial,'wb') as target:
+                    while chunk:=source.read(1<<20):target.write(chunk)
+                partial.replace(archive)
+            if hashlib.sha256(archive.read_bytes()).hexdigest()==SHA256:
+                break
+            archive.unlink()
+            error=ValueError('Zipformer archive checksum mismatch')
+        except Exception as exc:  # HTTPError 5xx, timeouts, resets
+            error=exc
+        wait=min(60,5*2**attempt)
+        print(f'Zipformer download attempt {attempt+1} failed ({error}); retrying in {wait}s',flush=True)
+        time.sleep(wait)
+    else:
+        raise RuntimeError(f'Could not download the Zipformer model: {error}')
     found=set()
     with tarfile.open(archive) as source:
         for member in source.getmembers():
