@@ -53,6 +53,10 @@ class DetectionSettings(BaseModel):
     standing_threshold_seconds: int = Field(strict=True, ge=1, le=300)
     proctor_dwell_seconds: int = Field(60, strict=True, ge=10, le=1800)
     evidence: EvidenceSettings = EvidenceSettings()
+    # Optional (older dashboards omit them; omitted = keep what is saved).
+    advanced: dict[str, float] | None = None
+    enabled: dict[str, bool] | None = None
+    auto_calibrate: bool | None = None
 
 
 class Review(BaseModel):
@@ -111,6 +115,10 @@ def create_app(settings=None, runtime=None, otp_store=None):
         stop = threading.Event()
         if getattr(settings, "vision_url", ""):
             threading.Thread(target=_keep_vision_warm, args=(settings.vision_url, stop), daemon=True).start()
+        if getattr(settings, "warmup", False) and getattr(runtime, "vision_factory", None) is None \
+                and hasattr(runtime, "warmup"):
+            # Load models now instead of on the first 'Bắt đầu phiên' click.
+            threading.Thread(target=runtime.warmup, name="examwatch-warmup", daemon=True).start()
         yield
         stop.set()
         runtime.close()
@@ -386,7 +394,8 @@ def create_app(settings=None, runtime=None, otp_store=None):
     @app.post("/api/settings/detection")
     def save_detection(body: DetectionSettings):
         return runtime.configure_detection(body.sensitivity, body.evidence.model_dump(),
-                                           body.proctor_dwell_seconds, body.standing_threshold_seconds)
+                                           body.proctor_dwell_seconds, body.standing_threshold_seconds,
+                                           body.advanced, body.enabled, body.auto_calibrate)
 
     @app.get("/api/alerts")
     def search_alerts(q: str = "", kind: str = "", status: str = "", session_id: str = "",

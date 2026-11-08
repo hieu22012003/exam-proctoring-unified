@@ -3,7 +3,7 @@ import time
 import cv2
 import numpy as np
 from concurrent.futures import ThreadPoolExecutor
-from .rules import posture_signal, classify_posture
+from .rules import posture_signal, classify_posture, pose_head_yaw
 from .tracking import Tracker, identify
 
 EMOTIONS = ["angry", "disgust", "fear", "happy", "sad", "surprise", "neutral"]
@@ -76,6 +76,56 @@ def due(tracks, stamp, interval, now, budget):
     if budget and len(tracks) > 3:
         ready = sorted(ready, key=lambda t: getattr(t, stamp))[:budget]
     return {id(t) for t in ready}
+
+
+# Real phones are small. On the repo's demo recordings the phone model returned
+# boxes 37-61 % of the frame width (screens, panels, sheets) at up to 0.60
+# confidence; those are rejected here instead of becoming phone alerts.
+PHONE_MAX_WIDTH, PHONE_MAX_HEIGHT, PHONE_MAX_FACE_AREA = .30, .45, 4.0
+
+
+def plausible_phone(bw, bh, owner=None):
+    """False for boxes far too large to be a phone (bw, bh normalized)."""
+    if bw > PHONE_MAX_WIDTH or bh > PHONE_MAX_HEIGHT:
+        return False
+    if owner is not None and len(getattr(owner, 'box', ())) == 4:
+        face_area = max(owner.box[2] * owner.box[3], 1e-4)
+        if bw * bh > PHONE_MAX_FACE_AREA * face_area:
+            return False
+    return True
+
+
+def assign_phone(cx, cy, tracks):
+    """The person a phone box most plausibly belongs to, or None.
+
+    Region = the visible body extended down to the bottom of the frame (lap, under
+    the desk) and half a shoulder width sideways. When regions overlap, the nearest
+    wrist wins. The old rule required the box inside the landmark bounding box and
+    dropped it whenever two people qualified."""
+    best = None
+    for track in tracks:
+        if getattr(track, 'role', 'student') == 'proctor':
+            continue
+        lm = track.landmarks
+        points = [p for p in lm if len(p) >= 4 and p[3] >= .25]
+        if len(points) >= 4 and len(lm) > 16:
+            px, py = [p[0] for p in points], [p[1] for p in points]
+            sw = abs(lm[11][0] - lm[12][0]) if lm[11][3] >= .25 and lm[12][3] >= .25 else .1
+            margin = max(.05, sw * .5)
+            if not (min(px) - margin <= cx <= max(px) + margin and cy >= min(py) - .05):
+                continue
+            anchors = [lm[i][:2] for i in (15, 16, 17, 18, 19, 20) if len(lm) > i and lm[i][3] >= .3]
+            if not anchors:
+                anchors = [[(lm[11][0] + lm[12][0]) / 2, (lm[11][1] + lm[12][1]) / 2 + sw]]
+        else:
+            bx, by, bw, bh = track.box
+            if not (bx - bw <= cx <= bx + 2 * bw and cy >= by):
+                continue
+            anchors = [[bx + bw / 2, by + bh * 2.5]]
+        distance = min((cx - a[0]) ** 2 + (cy - a[1]) ** 2 for a in anchors)
+        if best is None or distance < best[0]:
+            best = (distance, track)
+    return best[1] if best else None
 
 
 def mouth_points(face, width, height):
@@ -246,12 +296,46 @@ class Vision:
 
     def detect_phones(self, frame):
         h, w = frame.shape[:2]
-        result = self.phone_detector.predict(frame, conf=self.settings.phone_confidence, imgsz=960, verbose=False)[0]
+        # 640 = the size the model was trained/exported at (same as the Render ONNX).
+        result = self.phone_detector.predict(frame, conf=self.settings.phone_confidence, imgsz=640, verbose=False)[0]
         boxes = []
         for box in result.boxes:
             x1, y1, x2, y2 = [float(v) for v in box.xyxy[0].cpu().tolist()]
-            boxes.append(((x1 + x2) / (2 * w), (y1 + y2) / (2 * h), float(box.conf[0].cpu())))
+            boxes.append(((x1 + x2) / (2 * w), (y1 + y2) / (2 * h), float(box.conf[0].cpu()),
+                          (x2 - x1) / w, (y2 - y1) / h))
         return boxes
+
+    def warmup(self):
+        """Run the local models once at server start so the first session is not slow."""
+        frame = np.zeros((480, 640, 3), dtype=np.uint8)
+        frame[120:360, 240:400] = 128
+        self.faces(frame)
+        self.predict_emotion(frame, np.array([240, 120, 160, 240] + [0] * 11, dtype=np.float32))
+        if getattr(self, 'phone_detector', None) is not None:
+            self.detect_phones(frame)
+        self.reset()
+
+    def _update_head(self, track, face_yaw, now):
+        """Head yaw from YuNet and from the pose ears; the larger one wins."""
+        pose_yaw = pose_head_yaw(track.landmarks)
+        if pose_yaw is not None and (face_yaw is None or abs(pose_yaw) > abs(face_yaw)):
+            yaw, source = pose_yaw, 'pose'
+        else:
+            yaw, source = face_yaw, ('face' if face_yaw is not None else None)
+        track.head_yaw, track.head_source = (float(yaw) if yaw is not None else 0.0), source
+        active = yaw is not None and abs(yaw) >= self.settings.head_yaw
+        track.head_rule.update(active, now)
+        track.head_turning = active and track.head_rule.elapsed(now) >= track.head_rule.seconds
+
+    def _update_posture(self, track, now, signal=None):
+        track.signal = signal if signal is not None else posture_signal(track.landmarks, track.box)
+        if track.baseline is None and getattr(self.settings, 'auto_calibrate', True):
+            base = track.auto_baseline.update(track.signal, now)
+            if base is not None:
+                track.baseline, track.baseline_auto = base, True
+                track.baseline_owner = track.student_id
+                track.standing_rule.reset()
+        track.posture = classify_posture(track.baseline, track.signal, getattr(self.settings, 'standing_rise', .5))
 
     def blendshapes(self, frame, face):
         h, w = frame.shape[:2]
@@ -350,20 +434,7 @@ class Vision:
         for track, face in zip(tracks, faces):
             eye_mid = (float(face[4]) + float(face[6])) / 2
             eye_span = max(1.0, abs(float(face[4]) - float(face[6])))
-            track.head_yaw = (float(face[8]) - eye_mid) / eye_span
-            turning = abs(track.head_yaw) >= self.settings.head_yaw
-            if turning:
-                if now - track.head_suspicion_last > 0.75:
-                    track.head_suspicion_since = now
-                    track.head_suspicion_samples = 0
-                track.head_suspicion_last = now
-                track.head_suspicion_samples += 1
-            else:
-                track.head_suspicion_since = None
-                track.head_suspicion_samples = 0
-            track.head_turning = bool(turning and track.head_suspicion_since is not None
-                                      and now - track.head_suspicion_since >= 1.25
-                                      and track.head_suspicion_samples >= 3)
+            face_yaw = (float(face[8]) - eye_mid) / eye_span
             track.mouth_points=mouth_points(face,w,h)
             mouth_motion(track, gray, face)
             if id(track) in identity_due:
@@ -421,8 +492,8 @@ class Vision:
                 _, index = min(candidates)
                 assigned_poses.add(index)
                 track.landmarks = poses[index]
-            track.signal = posture_signal(track.landmarks, track.box)
-            track.posture = classify_posture(track.baseline, track.signal)
+            self._update_head(track, face_yaw, now)
+            self._update_posture(track, now)
         # Recover briefly occluded faces using the previous head position and
         # visible shoulders. Never assign a pose twice or resolve ambiguous pairs.
         lost = [t for t in self.tracker.tracks.values() if t not in tracks and t.signal]
@@ -451,18 +522,21 @@ class Vision:
             dx = signal['shoulder_x'] - track.signal['shoulder_x']
             dy = signal['nose_y'] - track.signal['nose_y']
             track.box = [track.box[0]+dx, track.box[1]+dy, *track.box[2:]]
-            track.signal, track.landmarks = signal, poses[i]
+            track.landmarks = poses[i]
             track.last_seen = now  # A fresh, unambiguous body observation keeps the track alive.
             track.mouth_points = []
             track.emotion, track.emotion_score = 'unknown', 0
             track.probabilities = None
-            track.posture = classify_posture(track.baseline, signal)
+            # The face is often lost *because* the head turned away (looking at a
+            # neighbour's paper): keep measuring yaw from the pose ears.
+            self._update_head(track, None, now)
+            self._update_posture(track, now, signal)
             tracks.append(track)
             recovered.add(track_id)
         for track in self.tracker.tracks.values():
             if track not in tracks:
-                track.head_suspicion_since = None
-                track.head_suspicion_samples = 0
+                track.head_rule.reset()
+                track.auto_baseline.reset()
                 track.head_turning = False
                 track.standing_rule.reset()
                 track.head_down_rule.reset()
@@ -480,21 +554,37 @@ class Vision:
                 for other in tracks:
                     if other.student_id == duplicate_id:
                         other.clear_identity()
-        for track in tracks:
-            track.has_phone = False
-            track.phone_confidence = 0.0
+        fresh = phone_job is not None or (remote is not None and remote.get("phones") is not None)
         if phone_job is not None:
-            self.phone_boxes, self.phone_at = phone_job.result(), now
-        for cx, cy, confidence in getattr(self, 'phone_boxes', []):
-            candidates = []
-            for track in tracks:
-                points = [p for p in track.landmarks if len(p) >= 4 and p[3] >= .25]
-                if len(points) < 4:
-                    continue
-                px, py = [p[0] for p in points], [p[1] for p in points]
-                if min(px) - .06 <= cx <= max(px) + .06 and min(py) - .04 <= cy <= max(py) + .04:
-                    candidates.append(track)
-            if len(candidates) == 1 and confidence > candidates[0].phone_confidence:
-                candidates[0].has_phone = True
-                candidates[0].phone_confidence = confidence
-        return tracks, len(all_faces) > self.settings.max_people
+            try:
+                self.phone_boxes, self.phone_at = phone_job.result(), now
+            except Exception:
+                import logging
+                logging.getLogger(__name__).exception("Phone detection failed")
+                self.phone_boxes, self.phone_at = [], now
+        if not self.settings.phone_enabled:
+            self.phone_boxes = []
+        for track in tracks:
+            track.phone_seen = False
+            track.phone_confidence = 0.0
+        phones = []
+        for box in getattr(self, 'phone_boxes', []):
+            cx, cy, confidence = (float(v) for v in box[:3])
+            sized = len(box) >= 5  # older vision services send centre + confidence only
+            bw, bh = (float(box[3]), float(box[4])) if sized else (.05, .08)
+            if sized and not plausible_phone(bw, bh):
+                continue
+            owner = assign_phone(cx, cy, tracks)
+            if sized and owner is not None and not plausible_phone(bw, bh, owner):
+                continue
+            phones.append({"bbox": [cx - bw / 2, cy - bh / 2, bw, bh], "confidence": round(confidence, 3),
+                           "track_id": owner.id if owner else None})
+            if owner is not None and confidence > owner.phone_confidence:
+                owner.phone_seen, owner.phone_confidence = True, confidence
+        # One box is not enough: the phone must keep being detected for
+        # phone_confirm_seconds (boxes are reused between scans, so count scans only).
+        for track in tracks:
+            if fresh and track.phone_seen:
+                track.phone_rule.hit(now)
+            track.has_phone = track.phone_rule.confirmed(now)
+        return tracks, len(all_faces) > self.settings.max_people, phones

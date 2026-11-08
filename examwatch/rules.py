@@ -1,5 +1,5 @@
 """Temporal rules use monotonic time; missing observations break continuity."""
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import math
 
 
@@ -62,9 +62,35 @@ def body_angles(landmarks, width, height, abdomen_anchor=None):
     result['lean_origin'] = [anchor[0]/width,anchor[1]/height]
     result['lean_target'] = [center[0]/width,center[1]/height]
     up = (center[0]-anchor[0],anchor[1]-center[1])
+    result['lean_side'] = -1 if up[0] < 0 else 1  # -1: towards the left of the image
     result['lean'] = (math.degrees(math.atan2(abs(up[0]),up[1]))
                       if up[1]>15 and result['lean_source']!='abdomen_uncalibrated' else None)
     return result
+
+
+def pose_head_yaw(landmarks):
+    """Signed head yaw from body-pose landmarks (nose vs. ears, else eyes).
+
+    YuNet compresses and then loses a face that turns towards profile, which is
+    exactly 'turning to read a neighbour's paper'. The pose ears keep working there.
+    Scaled to match the YuNet nose/eye ratio; positive = nose towards image right.
+    None when it cannot be measured."""
+    if not landmarks or len(landmarks) < 9:
+        return None
+    nose, l_eye, r_eye, l_ear, r_ear = (landmarks[i] for i in (0, 2, 5, 7, 8))
+    if len(nose) < 4 or nose[3] < .5:
+        return None
+    if l_ear[3] >= .5 and r_ear[3] >= .5 and abs(l_ear[0] - r_ear[0]) > .01:
+        mid, span = (l_ear[0] + r_ear[0]) / 2, abs(l_ear[0] - r_ear[0])
+        return max(-1.5, min(1.5, (nose[0] - mid) / span * 2))
+    # One ear hidden behind the head: a strong turn towards the hidden side.
+    for seen, hidden in ((l_ear, r_ear), (r_ear, l_ear)):
+        if seen[3] >= .5 and hidden[3] < .3:
+            return 1.0 if nose[0] > seen[0] else -1.0
+    if l_eye[3] >= .5 and r_eye[3] >= .5 and abs(l_eye[0] - r_eye[0]) > .005:
+        mid, span = (l_eye[0] + r_eye[0]) / 2, abs(l_eye[0] - r_eye[0])
+        return max(-1.5, min(1.5, (nose[0] - mid) / span))
+    return None
 
 
 @dataclass
@@ -148,6 +174,66 @@ class Sustained:
         return max(0, now - self.since) if self.since is not None else 0
 
 
+@dataclass
+class Persistence:
+    """Confirmed once a detector keeps reporting for `seconds` with gaps <= max_gap.
+
+    Unlike Sustained it needs no negative observations: a detector that simply
+    stops reporting counts as 'gone' after max_gap. Used for phone boxes, which
+    arrive only every phone_interval seconds."""
+    seconds: float
+    max_gap: float = 1.6
+    since: float | None = None
+    last: float | None = None
+    hits: int = 0
+
+    def reset(self):
+        self.since = self.last = None
+        self.hits = 0
+
+    def hit(self, now):
+        if self.last is None or now - self.last > self.max_gap or now < self.last:
+            self.since, self.hits = now, 0
+        self.last = now
+        self.hits += 1
+
+    def confirmed(self, now):
+        if self.last is None or now - self.last > self.max_gap:
+            return False
+        return now - self.since >= self.seconds and self.hits >= (1 if self.seconds <= 0 else 2)
+
+
+@dataclass
+class AutoBaseline:
+    """Take the seated reference automatically once the person holds still.
+
+    Before this, standing / head-down / moving / lean were all silent until the
+    proctor pressed 'Hiệu chuẩn'."""
+    window: float = 3.0
+    samples: list = field(default_factory=list)
+
+    def reset(self):
+        self.samples = []
+
+    def update(self, signal, now):
+        if signal is None:
+            self.samples = []
+            return None
+        self.samples = [(t, s) for t, s in self.samples if now - t <= self.window] + [(now, signal)]
+        if len(self.samples) < 3 or now - self.samples[0][0] < self.window * .8:
+            return None
+        noses = [s["nose_y"] for _, s in self.samples]
+        shoulders = [s["shoulder_y"] for _, s in self.samples]
+        xs = [s["shoulder_x"] for _, s in self.samples]
+        steady = max(.02, self.samples[-1][1]["scale"] * .25)
+        if max(noses) - min(noses) > steady or max(shoulders) - min(shoulders) > steady or max(xs) - min(xs) > .04:
+            return None
+        # Lowest head seen: never take the reference half-way through a rise.
+        base = max((s for _, s in self.samples), key=lambda s: s["nose_y"]).copy()
+        self.samples = []
+        return base
+
+
 def posture_signal(landmarks, face_box):
     """Head/shoulder position in image coordinates. Never invent occluded hips/legs."""
     if not landmarks or len(landmarks) < 25:
@@ -162,23 +248,28 @@ def posture_signal(landmarks, face_box):
             "scale": max(face_box[3], 0.04), "shoulder_width": abs(left[0] - right[0])}
 
 
-def classify_posture(baseline, current):
+def classify_posture(baseline, current, rise_factor=0.5):
+    """rise_factor: head rise needed for 'standing', in face heights.
+
+    The old fixed rule (head AND shoulders up by max(0.07, 0.75 x face height))
+    missed a half rise ('nhổm') completely; shoulders lift less than the head."""
     if baseline is None:
         return "uncalibrated"
     if current is None:
         return "insufficient"
     # Large lateral/scale changes invalidate a seat-relative comparison, but a
     # body that keeps its size while sliding away from the seat has moved.
+    # Rising towards the camera widens the shoulders, hence the 1.7 upper bound.
     ratio = current["shoulder_width"] / baseline["shoulder_width"]
     shift = abs(current["shoulder_x"] - baseline["shoulder_x"])
-    if not 0.65 < ratio < 1.5:
+    if not 0.6 < ratio < 1.7:
         return "insufficient"
     if shift > max(0.12, baseline["shoulder_width"] * 1.2):
         return "moving"
     rise_head = baseline["nose_y"] - current["nose_y"]
     rise_shoulders = baseline["shoulder_y"] - current["shoulder_y"]
-    threshold = max(0.07, baseline["scale"] * 0.75)
-    if rise_head > threshold and rise_shoulders > threshold:
+    threshold = max(0.035, baseline["scale"] * rise_factor)
+    if rise_head > threshold and rise_shoulders > threshold * 0.6:
         return "standing"
     # Head dropped towards the shoulders (bowed over the desk or under it).
     neck = baseline["shoulder_y"] - baseline["nose_y"]

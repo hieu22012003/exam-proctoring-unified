@@ -92,6 +92,8 @@ def analyze_frame(frame, want_pose=True, want_mesh=False, want_phone=False, conf
                                      "blendshapes": {c.category_name: round(float(c.score), 3) for c in shapes
                                                      if c.category_name in {"eyeBlinkLeft", "eyeBlinkRight", "jawOpen"}}})
     if want_phone and m["phone"] is not None:
-        out["phones"] = [[(x1 + x2) / (2 * w), (y1 + y2) / (2 * h), c]
+        # [cx, cy, conf, width, height], normalized; clients reading only the first
+        # three values keep working.
+        out["phones"] = [[(x1 + x2) / (2 * w), (y1 + y2) / (2 * h), c, (x2 - x1) / w, (y2 - y1) / h]
                          for x1, y1, x2, y2, c, _ in m["phone"].predict(frame, conf=conf)]
     return out
