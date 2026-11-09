@@ -193,3 +193,32 @@ def test_pipeline_drops_the_name_after_repeated_frontal_misses(monkeypatch):
         tracks, _, _ = v.process(FRAME, [person], now=i * .9)
         names.append(tracks[0].name)
     assert names[0] == "nguyen van a" and names[-1] == "Chưa xác định"
+
+
+def test_pipeline_tracks_five_people():
+    """Mục tiêu khách 09/11: khoảng 5 thí sinh trong khung."""
+    v = make_vision(max_people=5)
+    xs = [.12, .31, .5, .69, .88]
+    v.face_rows = [face_row(cx=x, size=.09) for x in xs]
+    v.remote.poses = [body(cx=x, nose=(x, .3), sw=.12, ears=((x - .03, .29, .9), (x + .03, .29, .9))) for x in xs]
+    for i in range(6):
+        tracks, overflow, _ = v.process(FRAME, [], now=i * .9)
+    assert len(tracks) == 5 and not overflow
+    assert all(t.landmarks for t in tracks) and all(t.baseline for t in tracks)
+    assert len({t.id for t in tracks}) == 5
+
+
+def test_identity_work_is_bounded_and_rotates_over_everyone():
+    from examwatch.vision import due
+    from examwatch.tracking import Track
+    people = [Track(i, [0, 0, .1, .1], 0) for i in range(5)]
+    seen = set()
+    for frame in range(5):
+        now = 10.0 + frame
+        picked = due(people, 'identity_at', 2.0, now, 1)
+        assert len(picked) == 1
+        for t in people:
+            if id(t) in picked:
+                t.identity_at = now
+                seen.add(t.id)
+    assert seen == {0, 1, 2, 3, 4}

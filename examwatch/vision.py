@@ -73,7 +73,7 @@ def update_drowsiness(track, blendshapes, now, window=60.0):
 def due(tracks, stamp, interval, now, budget):
     """Tracks whose identity/emotion refresh is due, oldest first, capped per frame."""
     ready = [t for t in tracks if now - getattr(t, stamp) >= interval]
-    if budget and len(tracks) > 3:
+    if budget and len(ready) > budget:
         ready = sorted(ready, key=lambda t: getattr(t, stamp))[:budget]
     return {id(t) for t in ready}
 

@@ -78,6 +78,12 @@ class Settings:
             yolo_imgsz=max(320, min(1280, int(os.getenv("EXAMWATCH_POSE_IMGSZ", "800")))),
             phone_interval=max(0.0, min(5.0, float(os.getenv("EXAMWATCH_PHONE_INTERVAL", "0.5")))),
             warmup=os.getenv("EXAMWATCH_WARMUP", "1").strip() != "0",
+            # Face embeddings / emotion crops per frame. On a 0.15-CPU host one SFace
+            # embedding costs ~0.2 s, so with 5 people the old budget (4 per frame)
+            # made each frame several seconds long. Names are sticky, so refreshing
+            # one person per frame in rotation is enough.
+            identity_budget=max(1, min(25, int(os.getenv("EXAMWATCH_IDENTITY_BUDGET", "1" if LITE else "4")))),
+            emotion_budget=max(1, min(25, int(os.getenv("EXAMWATCH_EMOTION_BUDGET", "2" if LITE else "6")))),
         )
 
 
