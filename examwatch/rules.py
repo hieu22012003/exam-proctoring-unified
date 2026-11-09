@@ -1,6 +1,17 @@
 """Temporal rules use monotonic time; missing observations break continuity."""
 from dataclasses import dataclass, field
 import math
+import statistics
+
+# Head-turn rule: a person must have been seen facing the camera for this long
+# before turning away can be reported. Someone who never faces the camera (a
+# person in the background at a computer, profile from the first frame) has no
+# "turned away" to report.
+FACING_SECONDS = 2.0
+# A seat at an angle to the camera has a resting yaw; turning is measured from
+# it, but only up to this much, so a reference taken while already looking aside
+# cannot hide a large turn.
+REST_YAW_LIMIT = .35
 
 
 def body_angles(landmarks, width, height, abdomen_anchor=None):
@@ -230,6 +241,8 @@ class AutoBaseline:
             return None
         # Lowest head seen: never take the reference half-way through a rise.
         base = max((s for _, s in self.samples), key=lambda s: s["nose_y"]).copy()
+        yaws = [s["yaw"] for _, s in self.samples if s.get("yaw") is not None]
+        base["yaw"] = statistics.median(yaws) if yaws else None
         self.samples = []
         return base
 

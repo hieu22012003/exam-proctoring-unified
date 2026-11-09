@@ -13,7 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from examwatch.config import Settings, ADVANCED  # noqa: E402
 from examwatch.rules import (pose_head_yaw, classify_posture, posture_signal,  # noqa: E402
-                             AutoBaseline, Persistence, sensitivity_thresholds)
+                             AutoBaseline, Persistence, sensitivity_thresholds, FACING_SECONDS)
 from examwatch.tracking import Track, apply_thresholds  # noqa: E402
 from examwatch.vision import Vision, assign_phone, plausible_phone  # noqa: E402
 from examwatch.runtime import Runtime  # noqa: E402
@@ -67,8 +67,10 @@ def test_head_turn_confirmed_at_one_fps():
     s = settings()
     v, t = FakeVision(s), track(s)
     t.landmarks = body()
+    for i in range(4):  # first seen facing the camera (~1.1 FPS)
+        v._update_head(t, 0.0, i * .9)
     states = []
-    for i in range(5):  # ~1.1 FPS, yaw 0.5 > threshold 0.30
+    for i in range(4, 9):  # then turns: yaw 0.5 > threshold 0.30
         v._update_head(t, .5, i * .9)
         states.append(t.head_turning)
     assert states[:2] == [False, False] and any(states), states
@@ -91,8 +93,9 @@ def _runtime(s):
     return r
 
 
-def _lean_events(rt, t, yaw, source):
+def _lean_events(rt, t, yaw, source, facing=FACING_SECONDS):
     frame = np.zeros((480, 640, 3), np.uint8)
+    t.facing_seconds = facing  # seen facing the camera before this
     t.baseline = {"nose_y": .3, "shoulder_y": .5, "shoulder_x": .5, "scale": .12,
                   "shoulder_width": .2, "abdomen_anchor": [.5, .70]}
     t.posture, kinds, now = 'seated', [], 0.0
@@ -241,3 +244,71 @@ def test_disabled_rule_is_silent():
     r = _runtime(s)
     kinds = [k for k in _lean_events(r, track(s), 0.0, 'face') if s.rule_on(k)]
     assert 'body_lean' not in kinds
+
+
+# ---------------------------------------------------------------- feedback 09/11 (video thử)
+def test_person_in_profile_from_the_start_is_never_flagged():
+    """Video 09/11, giây 30: người ngồi máy tính phía sau, luôn nghiêng mặt."""
+    s = settings()
+    v, t = FakeVision(s), track(s)
+    t.landmarks = body(nose=(.58, .30), ears=((.48, .29, .9), (.55, .29, .05)))
+    for i in range(12):
+        v._update_head(t, None, i * .9)
+        assert not t.head_turning
+    assert t.facing_seconds == 0
+
+
+def test_lean_of_a_never_facing_person_is_not_turned_into_looking_aside():
+    s = settings()
+    kinds = _lean_events(_runtime(s), track(s), .45, 'pose', facing=0.0)
+    assert 'head_turning' not in kinds
+
+
+def test_turn_is_measured_from_the_resting_yaw_of_an_angled_seat():
+    s = settings()
+    v, t = FakeVision(s), track(s)
+    t.landmarks = body()
+    t.baseline = {"nose_y": .3, "shoulder_y": .5, "shoulder_x": .5, "scale": .12,
+                  "shoulder_width": .2, "yaw": .25}  # seat at an angle to the camera
+    for i in range(8):
+        v._update_head(t, .25, i * .9)  # sitting normally: raw yaw .25
+    assert not t.head_turning and t.facing_seconds >= FACING_SECONDS
+    for i in range(8, 13):
+        v._update_head(t, .70, i * .9)  # turns a further .45
+    assert t.head_turning
+
+
+def test_resting_yaw_cannot_hide_a_large_turn():
+    s = settings()
+    v, t = FakeVision(s), track(s)
+    t.baseline = {"yaw": 1.0}  # reference taken while already looking aside
+    t.facing_seconds = FACING_SECONDS
+    t.landmarks = body()
+    for i in range(5):
+        v._update_head(t, 1.0, i * .9)
+    assert t.head_turning  # offset capped at REST_YAW_LIMIT
+
+
+def test_auto_baseline_records_the_resting_yaw():
+    ab = AutoBaseline()
+    got = None
+    for i in range(8):
+        sig = dict(posture_signal(body(), [.45, .24, .1, .12]), yaw=.2 + .01 * (i % 2))
+        got = ab.update(sig, i * .5) or got
+    assert got is not None and abs(got['yaw'] - .205) < .01
+
+
+def test_turned_face_reattaches_to_the_known_person_at_the_same_seat():
+    from examwatch.tracking import Tracker
+    tr = Tracker(settings())
+    [t] = tr.update([[.40, .20, .12, .16]], 0.0)
+    t.student_id, t.name = 'TS1', 'nguyen van a'
+    # Profile: box shifts sideways and narrows, IoU with the old box ~0.
+    [again] = tr.update([[.50, .21, .07, .15]], 1.0)
+    assert again is t and again.name == 'nguyen van a'
+    # Someone appearing far away is a different person.
+    tr2 = Tracker(settings())
+    [a] = tr2.update([[.10, .20, .12, .16]], 0.0)
+    a.student_id = 'TS1'
+    [b] = tr2.update([[.70, .20, .12, .16]], 1.0)
+    assert b is not a and b.student_id is None

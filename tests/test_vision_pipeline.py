@@ -152,3 +152,44 @@ def test_runtime_process_returns_phones_and_alerts():
         time.sleep(.25)
     assert out["phones"] and 'phone' in getattr(r.store, 'alerts', [])
     assert time.monotonic() - t0 < 10
+
+
+def test_pipeline_keeps_the_name_while_the_head_is_turned(monkeypatch):
+    """Video 09/11, giây 28-30: tên đổi thành "Chưa xác định" khi quay ngang."""
+    import examwatch.vision as vision_module
+    person = {"id": "TS1", "name": "nguyen van a", "role": "student"}
+    frontal = {"value": True}
+    monkeypatch.setattr(vision_module, "identify",
+                        lambda vec, gallery, thr, margin: (person, .8) if frontal["value"] else (None, 0.0))
+    v = make_vision()
+    v.settings.identity_interval = 0.0
+    v.remote.poses = [body()]
+    for i in range(4):
+        tracks, _, _ = v.process(FRAME, [person], now=i * .9)
+    assert tracks[0].name == "nguyen van a"
+    frontal["value"] = False
+    v.face_rows = [face_row(cx=.53, size=.09, yaw=.9)]   # profile face, shifted box
+    v.remote.poses = [body(nose=(.56, .30), ears=((.47, .29, .9), (.55, .29, .05)))]
+    for i in range(4, 10):
+        tracks, _, _ = v.process(FRAME, [person], now=i * .9)
+        assert len(tracks) == 1 and tracks[0].name == "nguyen van a", (i, tracks[0].name)
+    assert tracks[0].head_turning
+
+
+def test_pipeline_drops_the_name_after_repeated_frontal_misses(monkeypatch):
+    import examwatch.vision as vision_module
+    person = {"id": "TS1", "name": "nguyen van a", "role": "student"}
+    frontal = {"value": True}
+    monkeypatch.setattr(vision_module, "identify",
+                        lambda vec, gallery, thr, margin: (person, .8) if frontal["value"] else (None, 0.0))
+    v = make_vision()
+    v.settings.identity_interval = 0.0
+    v.remote.poses = [body()]
+    for i in range(3):
+        tracks, _, _ = v.process(FRAME, [person], now=i * .9)
+    frontal["value"] = False  # facing the camera, but nobody matches: a different person sat down
+    names = []
+    for i in range(3, 7):
+        tracks, _, _ = v.process(FRAME, [person], now=i * .9)
+        names.append(tracks[0].name)
+    assert names[0] == "nguyen van a" and names[-1] == "Chưa xác định"

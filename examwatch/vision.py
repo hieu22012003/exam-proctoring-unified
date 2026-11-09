@@ -3,7 +3,7 @@ import time
 import cv2
 import numpy as np
 from concurrent.futures import ThreadPoolExecutor
-from .rules import posture_signal, classify_posture, pose_head_yaw
+from .rules import posture_signal, classify_posture, pose_head_yaw, FACING_SECONDS, REST_YAW_LIMIT
 from .tracking import Tracker, identify
 
 EMOTIONS = ["angry", "disgust", "fear", "happy", "sad", "surprise", "neutral"]
@@ -93,6 +93,11 @@ def plausible_phone(bw, bh, owner=None):
         if bw * bh > PHONE_MAX_FACE_AREA * face_area:
             return False
     return True
+
+
+# Unmatched frontal face checks before a known name is dropped. A turned face
+# never counts: SFace cannot match a profile, which is not a different person.
+IDENTITY_MISSES = 3
 
 
 def assign_phone(cx, cy, tracks):
@@ -316,19 +321,35 @@ class Vision:
         self.reset()
 
     def _update_head(self, track, face_yaw, now):
-        """Head yaw from YuNet and from the pose ears; the larger one wins."""
+        """Head yaw from YuNet and from the pose ears (the larger one wins), measured
+        from the seat's resting yaw. Turning is reported only for someone who has
+        been seen facing the camera, so a person who is in profile from the start
+        (e.g. at a computer in the background) is not flagged."""
         pose_yaw = pose_head_yaw(track.landmarks)
         if pose_yaw is not None and (face_yaw is None or abs(pose_yaw) > abs(face_yaw)):
             yaw, source = pose_yaw, 'pose'
         else:
             yaw, source = face_yaw, ('face' if face_yaw is not None else None)
-        track.head_yaw, track.head_source = (float(yaw) if yaw is not None else 0.0), source
-        active = yaw is not None and abs(yaw) >= self.settings.head_yaw
+        rest = 0.0
+        if track.baseline and track.baseline.get('yaw') is not None:
+            rest = max(-REST_YAW_LIMIT, min(REST_YAW_LIMIT, float(track.baseline['yaw'])))
+        relative = float(yaw) - rest if yaw is not None else None
+        track.head_yaw_raw = float(yaw) if yaw is not None else 0.0
+        track.head_yaw, track.head_source = (relative if relative is not None else 0.0), source
+        last, track.head_seen_at = track.head_seen_at, now
+        threshold = self.settings.head_yaw
+        if relative is not None and abs(relative) < .8 * threshold and last is not None:
+            track.facing_seconds += min(max(0.0, now - last), 2.5)
+        active = (relative is not None and abs(relative) >= threshold
+                  and track.facing_seconds >= FACING_SECONDS)
         track.head_rule.update(active, now)
         track.head_turning = active and track.head_rule.elapsed(now) >= track.head_rule.seconds
 
     def _update_posture(self, track, now, signal=None):
         track.signal = signal if signal is not None else posture_signal(track.landmarks, track.box)
+        if track.signal is not None:
+            # The seated reference also records the resting head yaw (see _update_head).
+            track.signal = {**track.signal, 'yaw': track.head_yaw_raw if track.head_source else None}
         if track.baseline is None and getattr(self.settings, 'auto_calibrate', True):
             base = track.auto_baseline.update(track.signal, now)
             if base is not None:
@@ -441,7 +462,19 @@ class Vision:
                 person, score = identify(self.embedding(frame, face) if gallery else None, gallery,
                                          self.settings.face_threshold, self.settings.identity_margin)
                 new_id = person["id"] if person else None
-                if track.student_id != new_id:
+                keep_name = False
+                if new_id is None and track.student_id:
+                    # Turning to read a neighbour's paper makes the match fail; the
+                    # old code then renamed the person "Chưa xác định".
+                    turned = max(abs(face_yaw), abs(track.head_yaw_raw)) >= .8 * self.settings.head_yaw
+                    if not turned:
+                        track.identity_misses += 1
+                    keep_name = turned or track.identity_misses < IDENTITY_MISSES
+                elif new_id is not None:
+                    track.identity_misses = 0
+                if keep_name:
+                    track.identity_at = now
+                elif track.student_id != new_id:
                     # A failed face match must not erase the seat calibration.
                     # A positive different identity starts with its own baseline.
                     keep = new_id is None or track.baseline_owner in (None, new_id)
@@ -449,12 +482,13 @@ class Vision:
                     if new_id in self.tracker.calibrations:
                         track.baseline = self.tracker.calibrations[new_id].copy()
                         track.baseline_owner = new_id
-                track.student_id = new_id
-                track.name = person["name"] if person else "Chưa xác định"
-                track.role = person.get("role", "student") if person else "student"
-                track.identity_score, track.identity_at = score, now
-                if new_id and track.baseline:
-                    track.baseline_owner = new_id
+                if not keep_name:
+                    track.student_id = new_id
+                    track.name = person["name"] if person else "Chưa xác định"
+                    track.role = person.get("role", "student") if person else "student"
+                    track.identity_score, track.identity_at = score, now
+                    if new_id and track.baseline:
+                        track.baseline_owner = new_id
             if remote and remote.get("faces"):
                 fx, fy = (float(face[0]) + float(face[2]) / 2) / w, (float(face[1]) + float(face[3]) / 2) / h
                 near = min(remote["faces"], key=lambda m: (m["cx"] - fx) ** 2 + (m["cy"] - fy) ** 2)

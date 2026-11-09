@@ -61,6 +61,10 @@ class Track:
     # Tolerates 2.5 s between frames. The old counter restarted whenever two frames
     # were > 0.75 s apart, so on a slow host head turning could never be confirmed.
     head_rule: Sustained = field(default_factory=lambda: Sustained(1.25))
+    head_yaw_raw: float = 0.0          # before subtracting the seat's resting yaw
+    head_seen_at: float | None = None
+    facing_seconds: float = 0.0        # time seen roughly facing the camera
+    identity_misses: int = 0           # frontal face checks that matched nobody
     head_alert_at: float = -1e9
     lean_alert_at: float = -1e9
     arm_alert_at: float = -1e9
@@ -80,11 +84,13 @@ class Track:
         self.student_id, self.name = None, "Chưa xác định"
         self.identity_score = 0
         self.identity_at = -1e9
+        self.identity_misses = 0
         if not preserve_baseline:
             self.baseline = None
             self.baseline_owner = None
             self.baseline_auto = False
             self.auto_baseline.reset()
+            self.facing_seconds = 0.0
         self.probabilities = None
         self.emotion, self.emotion_score = "unknown", 0
         self.emotion_rule.reset()
@@ -147,6 +153,31 @@ class Tracker:
         matches, used = {}, set()
         for _, index, track_id in sorted(pairs, reverse=True):
             if track_id not in used:
+                matches[index] = self.tracks[track_id]
+                used.add(track_id)
+        # A face turning to profile moves and shrinks its box, so overlap drops and
+        # it used to start a new anonymous track ("Chưa xác định"). Give an
+        # unmatched face back to a known person lost at the same seat moments ago.
+        proposals = []
+        recent = [t for t in self.tracks.values()
+                  if t.id not in used and now - t.last_seen <= 3.0 and (t.student_id or t.baseline)]
+        for index, box in enumerate(boxes):
+            if index in matches:
+                continue
+            candidates = []
+            for track in recent:
+                old = track.box
+                width, height = max(old[2], box[2], 1e-6), max(old[3], box[3], 1e-6)
+                dx = abs(box[0] + box[2] / 2 - old[0] - old[2] / 2)
+                dy = abs(box[1] + box[3] / 2 - old[1] - old[3] / 2)
+                if (dx < .9 * width and dy < .6 * height
+                        and .5 < box[2] / max(old[2], 1e-9) < 2 and .5 < box[3] / max(old[3], 1e-9) < 2):
+                    candidates.append((dx / width + dy / height, track.id))
+            candidates.sort()
+            if candidates and (len(candidates) == 1 or candidates[1][0] - candidates[0][0] > .3):
+                proposals.append((candidates[0][0], index, candidates[0][1]))
+        for _, index, track_id in sorted(proposals):
+            if track_id not in used and index not in matches:
                 matches[index] = self.tracks[track_id]
                 used.add(track_id)
         active = []

@@ -12,6 +12,7 @@ from .clips import EvidenceClips
 from .rules import body_angles, Sustained, sensitivity_thresholds
 from .tracking import apply_thresholds
 from .config import ADVANCED, ADVANCED_GROUPS, ALERT_KINDS, validate_advanced, validate_enabled
+from .rules import FACING_SECONDS
 
 
 def side(sign):
@@ -232,7 +233,8 @@ class Runtime:
                 and angles.get('lean_origin') and track.posture == 'seated'):
             track.baseline['abdomen_anchor'] = angles['lean_origin'][:]
         head_on = s.rule_on('head_turning')
-        looking_aside = head_on and track.head_source is not None and abs(track.head_yaw) >= .7 * s.head_yaw
+        looking_aside = (head_on and track.head_source is not None and abs(track.head_yaw) >= .7 * s.head_yaw
+                         and track.facing_seconds >= FACING_SECONDS)
         head_dir = side(track.head_yaw)
         if head_on and track.head_turning and now - track.head_alert_at >= cooldown:
             track.head_alert_at = now
@@ -374,6 +376,8 @@ class Runtime:
             now = time.monotonic()
             offset = now - self.started
             self.clips.push(frame, now)
+            ratio = float(getattr(self.settings, 'min_face_ratio', 0) or 0)
+            largest = max((t.box[3] for t in tracks if t.role != "proctor"), default=0)
             for track in tracks:
                 events = self._pose_events(track, frame, now)
                 if track.standing_rule.update(track.posture == "standing", now):
@@ -402,6 +406,8 @@ class Runtime:
                 events = [e for e in events if self.settings.rule_on(e[0])]
                 if track.role == "proctor":
                     events = []  # proctors are never reported as candidates
+                if ratio and track.box[3] < ratio * largest:
+                    events = []  # a small face far behind the candidates (proctor setting)
                 for kind, detail in events:
                     self._record_alert(track, kind, detail, offset, now, frame)
                 if track.role != "proctor" and now - track.observed_at >= 1.0:
@@ -488,6 +494,7 @@ class Runtime:
                 "has_phone": t.has_phone, "phone_seen": t.phone_seen, "phone_confidence": round(t.phone_confidence, 3),
                 "head_turning": t.head_turning, "head_yaw": round(t.head_yaw, 3), "head_source": t.head_source,
                 "head_seconds": round(t.head_rule.elapsed(now), 1),
+                "facing_ready": t.facing_seconds >= FACING_SECONDS,
                 "calibrated": t.baseline is not None, "calibration_auto": t.baseline_auto, "landmarks": t.landmarks,
                 "lean_threshold": round(t.lean_rule.threshold, 1),
                 "mouth_points": t.mouth_points,

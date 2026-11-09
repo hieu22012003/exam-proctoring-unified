@@ -51,6 +51,7 @@ class Settings:
     auto_calibrate: bool = True       # take the seated reference when someone holds still ~3 s
     phone_confirm_seconds: float = 1.0
     alert_cooldown: float = 6.0
+    min_face_ratio: float = 0.0       # ignore faces smaller than this x the largest one (0 = off)
     advanced: dict = None             # explicit overrides saved by the proctor
     enabled: dict = None              # alert kind -> on/off
     warmup: bool = True
@@ -98,6 +99,9 @@ ADVANCED = {
     "stand_seconds":         (.5, 60, 1.5, "standing", "Giữ nhổm dậy (giây)", ""),
     "negative_seconds":      (5, 300, 20.0, "other", "Cảm xúc tiêu cực kéo dài (giây)", ""),
     "alert_cooldown":        (2, 120, 6.0, "other", "Giãn cách 2 cảnh báo cùng loại (giây)", ""),
+    "min_face_ratio":        (0, .9, 0.0, "other", "Bỏ qua mặt nhỏ (× mặt lớn nhất)",
+                              "0 = tắt. Ví dụ 0,6: không cảnh báo người ở xa phía sau có mặt nhỏ hơn "
+                              "60 % thí sinh gần camera nhất. Để 0 khi camera quay cả phòng nhiều hàng ghế."),
 }
 # None default = taken from the sensitivity slider.
 
