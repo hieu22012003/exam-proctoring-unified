@@ -65,6 +65,8 @@ class Track:
     head_seen_at: float | None = None
     facing_seconds: float = 0.0        # time seen roughly facing the camera
     identity_misses: int = 0           # frontal face checks that matched nobody
+    pending_id: str | None = None      # a different registered person seen once
+    pending_hits: int = 0
     head_alert_at: float = -1e9
     lean_alert_at: float = -1e9
     arm_alert_at: float = -1e9
@@ -85,6 +87,7 @@ class Track:
         self.identity_score = 0
         self.identity_at = -1e9
         self.identity_misses = 0
+        self.pending_id, self.pending_hits = None, 0
         if not preserve_baseline:
             self.baseline = None
             self.baseline_owner = None

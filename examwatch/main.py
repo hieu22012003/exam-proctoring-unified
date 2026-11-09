@@ -79,6 +79,19 @@ class OtpCode(BaseModel):
     code: str = Field(min_length=6, max_length=6, pattern=r"^\d{6}$")
 
 
+def duplicate_enrollment(vectors, enrolled, student_id, threshold):
+    """The already enrolled person whose face matches these samples, if any."""
+    new = np.asarray(vectors, dtype=np.float32)
+    best = None
+    for person in enrolled:
+        if person.get("id") == student_id or not person.get("embeddings"):
+            continue
+        score = float(np.max(new @ np.asarray(person["embeddings"], dtype=np.float32).T))
+        if score >= threshold and (best is None or score > best[0]):
+            best = (score, person)
+    return best[1] if best else None
+
+
 def decode_frame(data, width):
     if len(data) > 1_500_000:
         raise ValueError("Ảnh vượt quá 1.5 MB.")
@@ -313,6 +326,13 @@ def create_app(settings=None, runtime=None, otp_store=None):
             similarities = np.asarray(vectors) @ np.asarray(vectors).T
             if float(similarities.min()) < settings.face_threshold:
                 raise ValueError("Ảnh đăng ký không nhất quán. Hãy chụp lại cùng một người.")
+            # The same face under two codes (e.g. a proctor also enrolled as a
+            # candidate) makes identify() ambiguous for both, so neither is recognised.
+            duplicate = duplicate_enrollment(vectors, runtime.store.students(with_embeddings=True),
+                                             body.student_id, settings.face_threshold)
+            if duplicate:
+                raise ValueError(f"Khuôn mặt này đã được đăng ký cho {duplicate['name']} (mã {duplicate['id']}). "
+                                 "Xóa đăng ký cũ trước nếu muốn đăng ký lại.")
             try:
                 runtime.store.add_student(body.student_id, body.name.strip(), vectors, body.role)
             except sqlite3.IntegrityError as exc:

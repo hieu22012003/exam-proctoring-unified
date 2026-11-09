@@ -470,8 +470,19 @@ class Vision:
                     if not turned:
                         track.identity_misses += 1
                     keep_name = turned or track.identity_misses < IDENTITY_MISSES
-                elif new_id is not None:
+                elif new_id is not None and track.student_id and new_id != track.student_id:
+                    # One blurred or dim frame can match a neighbour: switch a named
+                    # person to another registered name only on two matches in a row.
                     track.identity_misses = 0
+                    if track.pending_id == new_id:
+                        track.pending_hits += 1
+                    else:
+                        track.pending_id, track.pending_hits = new_id, 1
+                    keep_name = track.pending_hits < 2
+                else:
+                    track.pending_id, track.pending_hits = None, 0
+                    if new_id is not None:
+                        track.identity_misses = 0
                 if keep_name:
                     track.identity_at = now
                 elif track.student_id != new_id:
@@ -581,13 +592,18 @@ class Vision:
                 track.right_arm_rule.reset()
                 track.lean_rule.reset()
                 track.angles = {}
-        # Do not attach the same registered name to two visible people.
+        # Do not attach the same registered name to two visible people. Keep it on
+        # the best match; only the other track loses the name (it used to clear both,
+        # including both seat calibrations).
+        owners = {}
         for track in tracks:
-            if track.student_id and sum(t.student_id == track.student_id for t in tracks) > 1:
-                duplicate_id = track.student_id
-                for other in tracks:
-                    if other.student_id == duplicate_id:
-                        other.clear_identity()
+            if track.student_id:
+                owners.setdefault(track.student_id, []).append(track)
+        for same in owners.values():
+            if len(same) > 1:
+                same.sort(key=lambda t: (t.identity_score, t.identity_at), reverse=True)
+                for other in same[1:]:
+                    other.clear_identity(preserve_baseline=True)
         fresh = phone_job is not None or (remote is not None and remote.get("phones") is not None)
         if phone_job is not None:
             try:

@@ -21,6 +21,25 @@ def unreliable_segment(segment):
     return False
 
 
+def voiced_seconds(samples, rate=16000):
+    """Seconds of 20 ms frames clearly louder than the chunk's own noise floor.
+
+    The browser cuts chunks at pauses, so most chunks contain their background
+    noise; a fan or keyboard alone never rises far above it. The cap keeps a
+    chunk of continuous speech (no quiet frames) from setting its own floor."""
+    hop = int(rate * .02)
+    frames = len(samples) // hop
+    if frames == 0:
+        return 0.0
+    rms = np.sqrt(np.mean(np.square(samples[:frames * hop].reshape(frames, hop)), axis=1))
+    floor = float(np.percentile(rms, 20))
+    threshold = max(0.005, min(2.5 * floor, 0.012))
+    return float(np.count_nonzero(rms > threshold)) * .02
+
+
+MIN_VOICED_SECONDS = 0.3
+
+
 class Speech:
     def __init__(self, settings):
         self.zipformer = settings.whisper_name in {'zipformer-vi-30m','zipformer-vi-30m-lora','zipformer-vi-30m-lora-low-lr20'}
@@ -49,6 +68,10 @@ class Speech:
         samples = np.asarray(samples, dtype=np.float32)
         # Quiet chunks are excluded before ASR; Silero VAD is also enabled below.
         if not len(samples) or float(np.sqrt(np.mean(samples ** 2))) < 0.002:
+            return []
+        # Noise-only chunks made the Zipformer emit short nonsense words.
+        if voiced_seconds(samples) < MIN_VOICED_SECONDS:
+            self.last_warning = "Đã bỏ qua đoạn chỉ có tạp âm"
             return []
         if getattr(self, 'zipformer', False):
             # Each pause-delimited browser chunk gets its own decoder state.

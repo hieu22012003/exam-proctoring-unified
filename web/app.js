@@ -25,6 +25,7 @@ let cameraResultAt = null, cameraAnalysisFps = 0;
 const frameCanvas = document.createElement('canvas');
 const framePair = new ExamWatchFrames.FramePair();
 let phones = [];
+let sessionClock = {id: null, at: 0};
 // Default: the live <video> stays on screen and the latest AI result is drawn over
 // it, so the picture moves at camera speed even when the server manages ~1 FPS.
 // "Khớp khung AI" restores the old view: only the exact analysed frame is shown.
@@ -132,7 +133,11 @@ async function startAudio(row) {
   await audioContext.resume();
   audioSource = audioContext.createMediaStreamSource(audioStream);
   audioNode = new AudioWorkletNode(audioContext, 'examwatch-capture');
-  const base = Math.max(0, (Date.now() - new Date(row.started_at).getTime()) / 1000);
+  // Session time from this page's own monotonic clock: a PC clock that is a few
+  // seconds off made the server reject every audio chunk.
+  const base = row.id === sessionClock.id
+    ? Math.max(0, (performance.now() - sessionClock.at) / 1000)
+    : Math.max(0, (Date.now() - new Date(row.started_at).getTime()) / 1000);
   audioChain = Promise.resolve();
   audioNode.port.onmessage = ({data}) => {
     if (data.done) { flushDone?.(); return; }
@@ -215,6 +220,8 @@ $('start-session').addEventListener('click', async () => {
     await connectCamera();
     notice('Đang nạp mô hình trên máy. Lần đầu có thể mất vài giây…', true);
     session = await api('/api/sessions', json({title,owner}));
+    sessionClock = {id: session.id, at: performance.now()};
+    if (livePoseOn()) window.ExamWatchLivePose?.init(Math.min(maxPeople, 6));
     $('alert-count').textContent = '0';
     $('alert-badge').textContent = '0';
     $('alerts').innerHTML = '<div class="empty"><span class="empty-icon">✓</span><h3>Chưa có cảnh báo</h3><p>Cảnh báo tư thế lưu video, kèm thời gian để giám thị kiểm tra.</p></div>';
@@ -278,7 +285,7 @@ async function frameLoop() {
       const resultAt=performance.now();
       if(cameraResultAt!==null){const fps=1000/Math.max(1,resultAt-cameraResultAt);cameraAnalysisFps=cameraAnalysisFps ? .3*fps+.7*cameraAnalysisFps : fps;}
       cameraResultAt=resultAt;
-      $('camera-stamp').textContent = `${syncMode() ? 'ẢNH ĐÃ PHÂN TÍCH' : 'CAMERA TRỰC TIẾP'} · AI ${cameraAnalysisFps.toFixed(1)} FPS · ${Math.round(resultAt-started)} ms`;
+      $('camera-stamp').textContent = `${syncMode() ? 'ẢNH ĐÃ PHÂN TÍCH' : 'CAMERA TRỰC TIẾP'} · AI ${cameraAnalysisFps.toFixed(1)} FPS · ${Math.round(resultAt-started)} ms${!syncMode() && window.ExamWatchLivePose?.ready && livePoseOn() ? ' · khung bám video' : ''}`;
       $('people-count').innerHTML = `${tracks.filter(t=>t.role!=='proctor').length} <small>/ ${maxPeople}</small>`;
       $('latency').innerHTML = `${result.inference_ms} <small>ms</small>`;
       renderPeople();
@@ -299,6 +306,19 @@ async function frameLoop() {
 function renderPeople() {
   $('people').innerHTML = tracks.length ? [...tracks].sort((a,b)=>(b.role==='proctor')-(a.role==='proctor')).map((t) => t.role==='proctor' ? `<div class="person proctor"><span class="avatar">GT</span><div class="person-text"><b>${esc(t.name)} · Giám thị</b><small>${t.dwell_student ? `Đứng cạnh bàn ${esc(t.dwell_student)} · ${Math.round(t.dwell_seconds)}s` : 'Đang di chuyển trong phòng'}</small></div><span class="tag ${t.dwell_seconds>=(window.examwatchDwell||60)*.8?'warn':''}">Giám thị</span></div>` : `<div class="person"><span class="avatar">${esc(t.student_id ? t.name.split(' ').map(s=>s[0]).slice(-2).join('') : '#'+t.id)}</span><div class="person-text"><b>${esc(t.name)}</b><small>${esc(postureNames[t.posture])}${t.mouth_activity>=2.5 ? ' · 🗣 đang nói' : ''}${t.drowsy ? ` · mắt nhắm ${Math.round(t.perclos*100)}%` : ''}${t.head_turning ? ` · <b class="warn-text">quay mặt sang ${sideText(t.head_yaw)}</b>` : t.head_seconds ? ` · lệch mặt ${t.head_seconds}s / ${detectionValue('head_seconds',1.25)}s` : ''}${t.head_source && t.facing_ready===false ? ' · chưa nhìn thẳng camera (chưa xét quay mặt)' : ''}${t.has_phone ? ' · <b class="warn-text">Phát hiện điện thoại</b>' : t.phone_seen ? ' · nghi điện thoại (đang xác nhận)' : ''}${t.posture==='standing' ? ` · ${t.standing_seconds}s / ${detectionValue('stand_seconds',1.5)}s` : ''}${t.negative_seconds ? ` · tiêu cực ${t.negative_seconds}s / ${detectionValue('negative_seconds',20)}s` : ''}</small>${poseWatchHTML(t)}</div><span class="tag ${t.has_phone||['anxious','sad','tired'].includes(moodOf(t))?'warn':''}">${t.has_phone ? 'Điện thoại · '+Math.round(t.phone_confidence*100)+'%' : `${esc(moodNames[moodOf(t)])} · ${esc(emotionNames[t.emotion])} ${t.emotion==='unknown'?'':Math.round(t.emotion_score*100)+'%'}`}</span></div>`).join('') : '<div class="empty compact">Chưa thấy khuôn mặt. Hãy kiểm tra góc camera và ánh sáng.</div>';
 }
+// Live mode: move each server result with the matching live pose (live-pose.js),
+// so boxes and skeletons sit on the person in the live video, not where they
+// were when the server analysed the frame (~1 s earlier on a small host).
+const livePoseOn = () => $('live-pose')?.checked !== false;
+function followLive(t, pose) {
+  const n = t.landmarks[0], dx = pose[0][0] - n[0], dy = pose[0][1] - n[1];
+  const shift = (p) => [p[0] + dx, p[1] + dy, ...p.slice(2)];
+  const ls = pose[11], rs = pose[12];
+  const target = ls && rs && ls[3] > .5 && rs[3] > .5 ? [(ls[0] + rs[0]) / 2, (ls[1] + rs[1]) / 2]
+    : (t.lean_target ? shift(t.lean_target) : t.lean_target);
+  return {...t, bbox: [t.bbox[0] + dx, t.bbox[1] + dy, t.bbox[2], t.bbox[3]], landmarks: pose,
+    mouth_points: (t.mouth_points || []).map(shift), lean_target: target, live: true};
+}
 const connections = [[0,1],[1,2],[2,3],[3,7],[0,4],[4,5],[5,6],[6,8],[11,12],[11,13],[13,15],[12,14],[14,16],[11,23],[12,24],[23,24]];
 function draw() {
   const video = $('video'), canvas = $('overlay');
@@ -311,7 +331,23 @@ function draw() {
       if (capturing) pairedTracks = tracks;
     }
     const ctx=canvas.getContext('2d'), w=canvas.width,h=canvas.height;
-    if (pairedTracks && performance.now()-trackAt < 1800) for (const t of pairedTracks) {
+    let drawList = pairedTracks, spare = [];
+    const LP = window.ExamWatchLivePose;
+    if (pairedTracks && capturing && !syncMode() && LP?.ready && livePoseOn()) {
+      const poses = LP.detect(video);
+      const {byTrack, unused} = LP.match(pairedTracks, poses);
+      spare = unused.map((i) => poses[i]);
+      drawList = pairedTracks.map((t, i) => byTrack.has(i) ? followLive(t, poses[byTrack.get(i)]) : t);
+    }
+    if (spare.length && $('show-pose').checked) {
+      // A person the server has not analysed yet: thin grey skeleton only.
+      ctx.strokeStyle = '#a9bcc7'; ctx.lineWidth = 1.5;
+      for (const p of spare) for (const [a, b] of connections) {
+        const pa = p[a], pb = p[b];
+        if (pa && pb && pa[3] > .6 && pb[3] > .6) { ctx.beginPath(); ctx.moveTo(pa[0]*w, pa[1]*h); ctx.lineTo(pb[0]*w, pb[1]*h); ctx.stroke(); }
+      }
+    }
+    if (drawList && performance.now()-trackAt < 1800) for (const t of drawList) {
       const [x,y,bw,bh] = t.bbox;
       const alerting = t.role!=='proctor' && (t.has_phone || t.head_turning || ['standing','head_down','moving'].includes(t.posture));
       ctx.strokeStyle = t.role==='proctor' ? '#7fb7ff' : alerting ? '#ff7a59' : t.student_id ? '#c7e895' : '#f0cd86'; ctx.lineWidth=2;
@@ -527,3 +563,5 @@ window.addEventListener('examwatch-auth-ready',async(event)=>{
   }
   poll();
 },{once:true});
+
+$('live-pose')?.addEventListener('change', () => { if (livePoseOn() && capturing) window.ExamWatchLivePose?.init(Math.min(maxPeople, 6)); });

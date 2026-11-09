@@ -39,7 +39,7 @@ class Runtime:
         self.owner = None
         self.started = 0
         self.lock = threading.RLock()
-        self.audio = queue.Queue(maxsize=6)
+        self.audio = queue.Queue(maxsize=20)  # ~2 min of speech backlog on a slow host
         self.shutdown = threading.Event()
         self.worker = None
         self.audio_busy = False
@@ -453,7 +453,13 @@ class Runtime:
     def _proctor_dwell(self, tracks, offset, now, frame):
         """Remind a registered proctor who stays beside one candidate's desk too long."""
         proctors = [t for t in tracks if t.role == "proctor"]
-        students = [t for t in tracks if t.role != "proctor"]
+        # A proctor bending over a desk often hides that candidate's face; keep
+        # candidates seen in the last few seconds so the timer does not restart.
+        nearby = list(tracks)
+        tracker = getattr(getattr(self, 'vision', None), 'tracker', None)
+        if tracker is not None:
+            nearby += [t for t in tracker.tracks.values() if t not in tracks and now - t.last_seen < 5]
+        students = [t for t in nearby if t.role != "proctor"]
         active = set()
         for proctor in proctors:
             px, py = proctor.box[0] + proctor.box[2] / 2, proctor.box[1] + proctor.box[3] / 2
@@ -462,7 +468,7 @@ class Runtime:
                 sx, sy = student.box[0] + student.box[2] / 2, student.box[1] + student.box[3] / 2
                 reach = max(0.08, student.box[2] * 2.5)
                 d = abs(px - sx)
-                if d < reach and abs(py - sy) < 0.3 and (best is None or d < best[0]):
+                if d < reach and abs(py - sy) < 0.35 and (best is None or d < best[0]):
                     best = (d, student)
             if not best:
                 continue
@@ -514,10 +520,13 @@ class Runtime:
         with self.lock:
             self.require_owner(owner, capture_id)
             duration = len(samples) / rate
-            if offset < self.last_audio_end - 0.05:
-                raise ValueError("Đoạn âm thanh bị trùng hoặc sai thứ tự.")
-            if offset + duration > time.monotonic() - self.started + 3:
-                raise ValueError("Mốc thời gian âm thanh vượt quá thời gian phiên thi.")
+            # Offsets come from the browser. A clock that runs ahead or a late
+            # first chunk used to reject every chunk of the session; place the
+            # chunk on the session timeline instead.
+            elapsed = time.monotonic() - self.started
+            if offset + duration > elapsed + 3:
+                offset = max(self.last_audio_end, elapsed - duration)
+            offset = max(offset, self.last_audio_end)
             try:
                 self.audio.put_nowait((self.session["id"], samples, rate, offset))
             except queue.Full:
@@ -549,7 +558,9 @@ class Runtime:
     def attribute_speaker(self, start, end):
         """Person whose mouth moved most while the segment was spoken, if clearly ahead."""
         with self.lock:
-            window = [e for e in self.speaking if start - .4 <= e[0] <= end + .4]
+            # Frames arrive about once a second on a small host: a +/-0.4 s window
+            # usually held no frame at all, so nobody could be named.
+            window = [e for e in self.speaking if start - 1.0 <= e[0] <= end + 1.0]
         per = {}
         for _, track_id, student_id, name, role, activity in window:
             item = per.setdefault(track_id, [0.0, 0, student_id, name, role])
