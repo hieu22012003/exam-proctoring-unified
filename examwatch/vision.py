@@ -357,6 +357,27 @@ class Vision:
                 track.baseline_owner = track.student_id
                 track.standing_rule.reset()
         track.posture = classify_posture(track.baseline, track.signal, getattr(self.settings, 'standing_rise', .5))
+        track.exit_up_at = None
+        track.rise_seen, track.near_top = 0.0, False
+        base, cur = track.baseline, track.signal
+        if base is not None:
+            threshold = max(0.035, base["scale"] * getattr(self.settings, 'standing_rise', .5))
+            if cur is not None:
+                # Head and shoulders both on the way up (stretching moves only the head).
+                track.rise_seen = min((base["nose_y"] - cur["nose_y"]) / threshold,
+                                      (base["shoulder_y"] - cur["shoulder_y"]) / (.6 * threshold))
+            # A face cut by the top edge at seat size (leaning towards the camera
+            # makes it larger instead).
+            track.near_top = track.box[1] < .03 and track.box[3] <= 1.4 * base["scale"]
+
+    def _left_upwards(self, track, rises, now):
+        """Did this calibrated person just leave the frame through the top?"""
+        if track.rise_seen >= .35 or track.near_top:
+            return True
+        cx, width = track.box[0] + track.box[2] / 2, track.box[2]
+        # The browser runs pose at ~15 FPS and reports noses that rose and left
+        # through the top edge (web/live-pose.js), which the 1 FPS server misses.
+        return any(age <= 4.0 and abs(x - cx) < max(.12, 1.2 * width) for x, age in (rises or []))
 
     def blendshapes(self, frame, face):
         h, w = frame.shape[:2]
@@ -372,7 +393,7 @@ class Vision:
         result = self.face_mesh.detect(self.mp.Image(image_format=self.mp.ImageFormat.SRGB, data=np.ascontiguousarray(crop)))
         return result.face_blendshapes[0] if result.face_blendshapes else None
 
-    def process(self, frame, gallery, now=None):
+    def process(self, frame, gallery, now=None, rises=None):
         now = time.monotonic() if now is None else now
         h, w = frame.shape[:2]
         # The phone detector is the slowest model: run it beside face/pose work and
@@ -554,7 +575,8 @@ class Vision:
                 dx = signal['shoulder_x'] - track.signal['shoulder_x']
                 dy = signal['nose_y'] - track.signal['nose_y']
                 ratio = signal['shoulder_width'] / track.signal['shoulder_width']
-                if abs(dx) < .10 and abs(dy) < .25 and .65 < ratio < 1.5:
+                up_gate = max(.25, 2.5 * track.box[3]) if dy < 0 else .25
+                if abs(dx) < .10 and abs(dy) < up_gate and .65 < ratio < 1.5:
                     candidates.append((dx*dx + dy*dy, track.id, signal))
             candidates.sort(key=lambda item: item[0])
             if candidates and (len(candidates) == 1 or candidates[1][0]-candidates[0][0] > .01):
@@ -578,6 +600,22 @@ class Vision:
             self._update_posture(track, now, signal)
             tracks.append(track)
             recovered.add(track_id)
+        # An empty seat after the head rose out of the top of the frame: the person
+        # stood up. Keep reporting the seat as 'standing' (rules keep running) until
+        # the face comes back or the track expires.
+        for track in list(self.tracker.tracks.values()):
+            if track in tracks or not track.baseline:
+                continue
+            if track.exit_up_at is None:
+                if now - track.last_seen > 3.5 or not self._left_upwards(track, rises, now):
+                    continue
+                track.exit_up_at = now
+            track.posture, track.landmarks, track.mouth_points = 'standing', [], []
+            track.head_turning = False
+            track.head_rule.reset()
+            track.left_arm_rule.reset(); track.right_arm_rule.reset(); track.lean_rule.reset()
+            track.angles = {}
+            tracks.append(track)
         for track in self.tracker.tracks.values():
             if track not in tracks:
                 track.head_rule.reset()

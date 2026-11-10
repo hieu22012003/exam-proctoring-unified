@@ -92,6 +92,19 @@ def duplicate_enrollment(vectors, enrolled, student_id, threshold):
     return best[1] if best else None
 
 
+def parse_rises(text):
+    """Browser report of heads that rose out of the top of the frame: 'x:age,x:age'."""
+    rises = []
+    for item in (text or "").split(",")[:8]:
+        try:
+            x, age = (float(v) for v in item.split(":"))
+        except ValueError:
+            continue
+        if np.isfinite(x) and np.isfinite(age) and 0 <= x <= 1 and 0 <= age <= 10:
+            rises.append((x, age))
+    return rises
+
+
 def decode_frame(data, width):
     if len(data) > 1_500_000:
         raise ValueError("Ảnh vượt quá 1.5 MB.")
@@ -388,11 +401,11 @@ def create_app(settings=None, runtime=None, otp_store=None):
                         headers={"Content-Disposition": f'attachment; filename="exam-{session_id}.json"'})
 
     @app.post("/api/frames")
-    async def frame(request: Request, owner: str, capture_id: str):
+    async def frame(request: Request, owner: str, capture_id: str, rise: str = Query("", max_length=200)):
         from starlette.concurrency import run_in_threadpool
         data = await request.body()
         image = decode_frame(data, settings.frame_width)
-        return await run_in_threadpool(runtime.process, image, owner, capture_id)
+        return await run_in_threadpool(runtime.process, image, owner, capture_id, parse_rises(rise))
 
     @app.post("/api/audio", status_code=202)
     async def audio(request: Request, owner: str, capture_id: str,

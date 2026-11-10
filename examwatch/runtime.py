@@ -364,13 +364,13 @@ class Runtime:
                 raise ValueError("Chưa thấy rõ đầu và hai vai. Hãy chỉnh camera rồi thử lại.")
             return count
 
-    def process(self, frame, owner, capture_id):
+    def process(self, frame, owner, capture_id, rises=None):
         if not self.lock.acquire(blocking=False):
             raise BlockingIOError("Đang xử lý ảnh trước.")
         try:
             self.require_owner(owner, capture_id)
             started = time.monotonic()
-            result = self.vision.process(frame, self.gallery)
+            result = self.vision.process(frame, self.gallery, rises=rises) if rises else self.vision.process(frame, self.gallery)
             tracks, overflow = result[0], result[1]
             phones = result[2] if len(result) > 2 else []
             now = time.monotonic()
@@ -501,7 +501,7 @@ class Runtime:
                 "head_turning": t.head_turning, "head_yaw": round(t.head_yaw, 3), "head_source": t.head_source,
                 "head_seconds": round(t.head_rule.elapsed(now), 1),
                 "facing_ready": t.facing_seconds >= FACING_SECONDS,
-                "calibrated": t.baseline is not None, "calibration_auto": t.baseline_auto, "landmarks": t.landmarks,
+                "calibrated": t.baseline is not None, "exited": t.exit_up_at is not None, "calibration_auto": t.baseline_auto, "landmarks": t.landmarks,
                 "lean_threshold": round(t.lean_rule.threshold, 1),
                 "mouth_points": t.mouth_points,
                 "pose_angles": {key: round(rule.value,1) if rule.value is not None else None

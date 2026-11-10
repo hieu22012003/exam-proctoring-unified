@@ -12,7 +12,61 @@ const WASM = `https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@${VERSION}/wa
 const MODEL = 'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task';
 const MIN_INTERVAL_MS = 66; // ~15 FPS is plenty for drawing and keeps laptops cool
 
-const state = { ready: false, failed: null, loading: null, landmarker: null, poses: [], at: 0, lastTs: -1, ms: 0 };
+const state = { ready: false, failed: null, loading: null, landmarker: null, poses: [], at: 0, lastTs: -1, ms: 0,
+  chains: [], exits: [] };
+
+/* Heads that rose and left through the top of the frame.
+ * Standing up in front of a close webcam takes the head out of the picture in
+ * about a second; the server, at ~1 analysed frame per second, usually sees a
+ * seated frame and then an empty seat. Following noses here at ~15 FPS shows
+ * the rise itself. Leaning towards the camera also lifts the nose but widens
+ * the shoulders, so that is not counted. */
+const EXIT_TOP = 0.12, EXIT_RISE = 0.12, CHAIN_GATE = 0.15, KEEP_EXITS_S = 6;
+
+function risen(c) {
+  const last = c.path[c.path.length - 1];
+  const low = c.path.reduce((a, q) => (q.y > a.y ? q : a), last);
+  const widened = low.sw > 0 && last.sw > 1.4 * low.sw;
+  return low.y - last.y >= EXIT_RISE && !widened;
+}
+
+function follow(poses, now) {
+  const cur = poses.filter((p) => p[0] && p[0][3] >= 0.5).map((p) => ({
+    x: p[0][0], y: p[0][1], sw: Math.abs((p[11]?.[0] ?? 0) - (p[12]?.[0] ?? 0)),
+  }));
+  const pairs = [];
+  state.chains.forEach((c, ci) => cur.forEach((n, ni) => {
+    const d = Math.hypot(n.x - c.x, n.y - c.y);
+    if (d < CHAIN_GATE) pairs.push([d, ci, ni]);
+  }));
+  pairs.sort((a, b) => a[0] - b[0]);
+  const usedC = new Set(), usedN = new Set(), next = [];
+  for (const [, ci, ni] of pairs) {
+    if (usedC.has(ci) || usedN.has(ni)) continue;
+    usedC.add(ci); usedN.add(ni);
+    const c = state.chains[ci], n = cur[ni];
+    c.x = n.x; c.y = n.y;
+    c.path = c.path.filter((q) => now - q.at <= 2500).concat([{ at: now, y: n.y, sw: n.sw }]);
+    // Pose tracking can keep extrapolating a nose above the image for a moment.
+    if (n.y < 0 && !c.exited && risen(c)) { c.exited = true; state.exits.push({ x: c.x, at: now }); }
+    next.push(c);
+  }
+  state.chains.forEach((c, ci) => {
+    if (usedC.has(ci)) return;
+    const last = c.path[c.path.length - 1];
+    if (now - last.at > 400) return;            // lost for a while: forget it
+    if (last.y > EXIT_TOP) { next.push(c); return; }  // briefly missed, keep for a moment
+    if (!c.exited && risen(c)) state.exits.push({ x: c.x, at: now });
+  });
+  cur.forEach((n, ni) => { if (!usedN.has(ni)) next.push({ x: n.x, y: n.y, path: [{ at: now, y: n.y, sw: n.sw }] }); });
+  state.chains = next;
+  state.exits = state.exits.filter((e) => now - e.at <= KEEP_EXITS_S * 1000);
+}
+
+/** Recent upward exits as [{x, age}] (age in seconds) for the server. */
+function exits(now = performance.now()) {
+  return state.exits.map((e) => ({ x: e.x, age: (now - e.at) / 1000 })).filter((e) => e.age <= KEEP_EXITS_S);
+}
 
 async function create(vision, files, numPoses, delegate) {
   return vision.PoseLandmarker.createFromOptions(files, {
@@ -63,6 +117,7 @@ function detect(video, now = performance.now()) {
   } catch (error) {
     state.poses = [];
   }
+  follow(state.poses, now);
   state.lastTs = ts; state.at = now;
   return state.poses;
 }
@@ -89,6 +144,6 @@ function match(tracks, poses, maxAge = 1.0) {
   return { byTrack, unused: poses.map((_, i) => i).filter((i) => !used.has(i)) };
 }
 
-const api = { init, detect, match, get ready() { return state.ready; }, get failed() { return state.failed; }, get ms() { return state.ms; } };
+const api = { init, detect, match, exits, follow, get ready() { return state.ready; }, get failed() { return state.failed; }, get ms() { return state.ms; } };
 if (typeof window !== 'undefined') window.ExamWatchLivePose = api;
 export default api;

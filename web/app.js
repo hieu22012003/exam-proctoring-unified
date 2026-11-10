@@ -270,7 +270,10 @@ async function frameLoop() {
     try {
       const blob = await new Promise((resolve) => captureCanvas().toBlob(resolve,'image/jpeg',0.75));
       if (!capturing) break;
-      const result = await api(`/api/frames?owner=${encodeURIComponent(owner)}&capture_id=${row.capture_id}`, {
+      // Heads that the browser saw rise out of the top of the frame (stood up).
+      const rises = (window.ExamWatchLivePose?.ready && livePoseOn()) ? window.ExamWatchLivePose.exits() : [];
+      const rise = rises.length ? `&rise=${encodeURIComponent(rises.slice(-8).map((e) => `${e.x.toFixed(3)}:${e.age.toFixed(1)}`).join(','))}` : '';
+      const result = await api(`/api/frames?owner=${encodeURIComponent(owner)}&capture_id=${row.capture_id}${rise}`, {
         method:'POST',headers:{'Content-Type':'image/jpeg'},body:blob,
       });
       if (!capturing || session?.id !== row.id) break;
@@ -289,7 +292,7 @@ async function frameLoop() {
       $('people-count').innerHTML = `${tracks.filter(t=>t.role!=='proctor').length} <small>/ ${maxPeople}</small>`;
       $('latency').innerHTML = `${result.inference_ms} <small>ms</small>`;
       renderPeople();
-      if (result.overflow) notice('Có hơn 3 khuôn mặt. Bản demo chỉ xử lý 3 khuôn mặt lớn nhất.', true);
+      if (result.overflow) notice(`Có hơn ${maxPeople} khuôn mặt. Hệ thống chỉ xử lý ${maxPeople} khuôn mặt lớn nhất.`, true);
       lastError = '';
     } catch (e) {
       if (!capturing || session?.id !== row.id) break;
@@ -304,7 +307,7 @@ async function frameLoop() {
   }
 }
 function renderPeople() {
-  $('people').innerHTML = tracks.length ? [...tracks].sort((a,b)=>(b.role==='proctor')-(a.role==='proctor')).map((t) => t.role==='proctor' ? `<div class="person proctor"><span class="avatar">GT</span><div class="person-text"><b>${esc(t.name)} · Giám thị</b><small>${t.dwell_student ? `Đứng cạnh bàn ${esc(t.dwell_student)} · ${Math.round(t.dwell_seconds)}s` : 'Đang di chuyển trong phòng'}</small></div><span class="tag ${t.dwell_seconds>=(window.examwatchDwell||60)*.8?'warn':''}">Giám thị</span></div>` : `<div class="person"><span class="avatar">${esc(t.student_id ? t.name.split(' ').map(s=>s[0]).slice(-2).join('') : '#'+t.id)}</span><div class="person-text"><b>${esc(t.name)}</b><small>${esc(postureNames[t.posture])}${t.mouth_activity>=2.5 ? ' · 🗣 đang nói' : ''}${t.drowsy ? ` · mắt nhắm ${Math.round(t.perclos*100)}%` : ''}${t.head_turning ? ` · <b class="warn-text">quay mặt sang ${sideText(t.head_yaw)}</b>` : t.head_seconds ? ` · lệch mặt ${t.head_seconds}s / ${detectionValue('head_seconds',1.25)}s` : ''}${t.head_source && t.facing_ready===false ? ' · chưa nhìn thẳng camera (chưa xét quay mặt)' : ''}${t.has_phone ? ' · <b class="warn-text">Phát hiện điện thoại</b>' : t.phone_seen ? ' · nghi điện thoại (đang xác nhận)' : ''}${t.posture==='standing' ? ` · ${t.standing_seconds}s / ${detectionValue('stand_seconds',1.5)}s` : ''}${t.negative_seconds ? ` · tiêu cực ${t.negative_seconds}s / ${detectionValue('negative_seconds',20)}s` : ''}</small>${poseWatchHTML(t)}</div><span class="tag ${t.has_phone||['anxious','sad','tired'].includes(moodOf(t))?'warn':''}">${t.has_phone ? 'Điện thoại · '+Math.round(t.phone_confidence*100)+'%' : `${esc(moodNames[moodOf(t)])} · ${esc(emotionNames[t.emotion])} ${t.emotion==='unknown'?'':Math.round(t.emotion_score*100)+'%'}`}</span></div>`).join('') : '<div class="empty compact">Chưa thấy khuôn mặt. Hãy kiểm tra góc camera và ánh sáng.</div>';
+  $('people').innerHTML = tracks.length ? [...tracks].sort((a,b)=>(b.role==='proctor')-(a.role==='proctor')).map((t) => t.role==='proctor' ? `<div class="person proctor"><span class="avatar">GT</span><div class="person-text"><b>${esc(t.name)} · Giám thị</b><small>${t.dwell_student ? `Đứng cạnh bàn ${esc(t.dwell_student)} · ${Math.round(t.dwell_seconds)}s` : 'Đang di chuyển trong phòng'}</small></div><span class="tag ${t.dwell_seconds>=(window.examwatchDwell||60)*.8?'warn':''}">Giám thị</span></div>` : `<div class="person"><span class="avatar">${esc(t.student_id ? t.name.split(' ').map(s=>s[0]).slice(-2).join('') : '#'+t.id)}</span><div class="person-text"><b>${esc(t.name)}</b><small>${esc(postureNames[t.posture])}${t.mouth_activity>=2.5 ? ' · 🗣 đang nói' : ''}${t.drowsy ? ` · mắt nhắm ${Math.round(t.perclos*100)}%` : ''}${t.head_turning ? ` · <b class="warn-text">quay mặt sang ${sideText(t.head_yaw)}</b>` : t.head_seconds ? ` · lệch mặt ${t.head_seconds}s / ${detectionValue('head_seconds',1.25)}s` : ''}${t.head_source && t.facing_ready===false ? ' · chưa nhìn thẳng camera (chưa xét quay mặt)' : ''}${t.has_phone ? ' · <b class="warn-text">Phát hiện điện thoại</b>' : t.phone_seen ? ' · nghi điện thoại (đang xác nhận)' : ''}${t.posture==='standing' ? ` · ${t.exited ? 'đã rời khung hình phía trên · ' : ''}${t.standing_seconds}s / ${detectionValue('stand_seconds',1.5)}s` : ''}${t.negative_seconds ? ` · tiêu cực ${t.negative_seconds}s / ${detectionValue('negative_seconds',20)}s` : ''}</small>${poseWatchHTML(t)}</div><span class="tag ${t.has_phone||['anxious','sad','tired'].includes(moodOf(t))?'warn':''}">${t.has_phone ? 'Điện thoại · '+Math.round(t.phone_confidence*100)+'%' : `${esc(moodNames[moodOf(t)])} · ${esc(emotionNames[t.emotion])} ${t.emotion==='unknown'?'':Math.round(t.emotion_score*100)+'%'}`}</span></div>`).join('') : '<div class="empty compact">Chưa thấy khuôn mặt. Hãy kiểm tra góc camera và ánh sáng.</div>';
 }
 // Live mode: move each server result with the matching live pose (live-pose.js),
 // so boxes and skeletons sit on the person in the live video, not where they
@@ -333,8 +336,11 @@ function draw() {
     const ctx=canvas.getContext('2d'), w=canvas.width,h=canvas.height;
     let drawList = pairedTracks, spare = [];
     const LP = window.ExamWatchLivePose;
+    // Detection keeps running in 'Khớp khung AI' mode too: it also reports heads
+    // leaving through the top of the frame (standing up) to the server.
+    const livePoses = capturing && LP?.ready && livePoseOn() ? LP.detect(video) : [];
     if (pairedTracks && capturing && !syncMode() && LP?.ready && livePoseOn()) {
-      const poses = LP.detect(video);
+      const poses = livePoses;
       const {byTrack, unused} = LP.match(pairedTracks, poses);
       spare = unused.map((i) => poses[i]);
       drawList = pairedTracks.map((t, i) => byTrack.has(i) ? followLive(t, poses[byTrack.get(i)]) : t);
@@ -352,7 +358,7 @@ function draw() {
       const alerting = t.role!=='proctor' && (t.has_phone || t.head_turning || ['standing','head_down','moving'].includes(t.posture));
       ctx.strokeStyle = t.role==='proctor' ? '#7fb7ff' : alerting ? '#ff7a59' : t.student_id ? '#c7e895' : '#f0cd86'; ctx.lineWidth=2;
       ctx.strokeRect(x*w,y*h,bw*w,bh*h);
-      const label = t.role==='proctor' ? `${t.name} · Giám thị${t.dwell_seconds?` · ${Math.round(t.dwell_seconds)}s`:''}` : `${t.name} · ${t.has_phone ? 'Điện thoại' : t.head_turning ? `Quay mặt ${sideText(t.head_yaw)}` : ['standing','head_down','moving'].includes(t.posture) ? postureNames[t.posture] : moodNames[moodOf(t)]}`;
+      const label = t.role==='proctor' ? `${t.name} · Giám thị${t.dwell_seconds?` · ${Math.round(t.dwell_seconds)}s`:''}` : `${t.name} · ${t.has_phone ? 'Điện thoại' : t.head_turning ? `Quay mặt ${sideText(t.head_yaw)}` : ['standing','head_down','moving'].includes(t.posture) ? (t.exited ? 'Đứng dậy (ra khỏi khung)' : postureNames[t.posture]) : moodNames[moodOf(t)]}`;
       ctx.font=`${Math.max(12,Math.round(w/65))}px Segoe UI`;
       const tw=ctx.measureText(label).width+14;
       const ly=Math.max(25,y*h-4);

@@ -81,6 +81,11 @@ class Track:
     head_down_rule: Sustained = field(default_factory=lambda: Sustained(5))
     moving_rule: Sustained = field(default_factory=lambda: Sustained(3))
     tired_rule: Sustained = field(default_factory=lambda: Sustained(20))
+    # Standing up in front of a close webcam takes the head out of the top of the
+    # frame, usually between two analysed frames: the seat is then empty, not seated.
+    exit_up_at: float | None = None    # when this calibrated person left upwards
+    rise_seen: float = 0.0             # last head rise, in standing thresholds
+    near_top: bool = False             # last face box touched the top edge at seat scale
 
     def clear_identity(self, preserve_baseline=False):
         self.student_id, self.name = None, "Chưa xác định"
@@ -106,6 +111,11 @@ class Track:
 
 def apply_thresholds(track, settings):
     track.standing_rule.seconds = settings.stand_seconds
+    # A small host analyses a frame every 1.5-3 s; a 2.5 s gap used to restart
+    # the timers, so 'standing' could never be confirmed.
+    for rule in (track.standing_rule, track.head_down_rule, track.moving_rule):
+        rule.max_gap = 5.0
+    track.head_rule.max_gap = 4.0
     track.head_down_rule.seconds = settings.standing_seconds
     track.moving_rule.seconds = max(2.0, settings.standing_seconds / 2)
     track.emotion_rule.seconds = settings.negative_seconds
@@ -144,11 +154,16 @@ class Tracker:
                 for track in self.tracks.values():
                     old = track.box
                     dx = abs(box[0]+box[2]/2-old[0]-old[2]/2)
-                    dy = abs(box[1]+box[3]/2-old[1]-old[3]/2)
-                    if (track.baseline and dx < .08 and dy < .25
+                    rise = (old[1]+old[3]/2) - (box[1]+box[3]/2)
+                    dy = abs(rise)
+                    # Standing up moves a close face up by several face heights
+                    # within one analysed frame; downward/sideways jumps stay tight.
+                    x_gate = max(.08, .5 * old[2])
+                    y_gate = max(.25, 2.5 * old[3]) if rise > 0 else .25
+                    if (track.baseline and dx < x_gate and dy < y_gate
                             and .65 < box[2]/max(old[2],1e-9) < 1.5
                             and .65 < box[3]/max(old[3],1e-9) < 1.5):
-                        candidates.append((1-dx/.08*.5-dy/.25*.5,track.id))
+                        candidates.append((1-dx/x_gate*.5-dy/y_gate*.5,track.id))
                 candidates.sort(reverse=True)
             if candidates and candidates[0][0] > 0.18:
                 if len(candidates) == 1 or candidates[0][0] - candidates[1][0] > 0.12:
@@ -172,8 +187,9 @@ class Tracker:
                 old = track.box
                 width, height = max(old[2], box[2], 1e-6), max(old[3], box[3], 1e-6)
                 dx = abs(box[0] + box[2] / 2 - old[0] - old[2] / 2)
-                dy = abs(box[1] + box[3] / 2 - old[1] - old[3] / 2)
-                if (dx < .9 * width and dy < .6 * height
+                rise = (old[1] + old[3] / 2) - (box[1] + box[3] / 2)
+                dy = abs(rise)
+                if (dx < .9 * width and dy < (2.5 if rise > 0 else .6) * height
                         and .5 < box[2] / max(old[2], 1e-9) < 2 and .5 < box[3] / max(old[3], 1e-9) < 2):
                     candidates.append((dx / width + dy / height, track.id))
             candidates.sort()
