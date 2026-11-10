@@ -381,7 +381,9 @@ class Runtime:
             for track in tracks:
                 events = self._pose_events(track, frame, now)
                 if track.standing_rule.update(track.posture == "standing", now):
-                    events.append(("standing", f"Nhổm dậy khỏi ghế ≥ {self.settings.stand_seconds:g} giây; cần giám thị kiểm tra."))
+                    events.append(("standing", (f"Đứng dậy, rời khỏi khung hình ≥ {self.settings.stand_seconds:g} giây" if track.exit_up_at is not None
+                                                else f"Đứng dậy khỏi ghế ≥ {self.settings.stand_seconds:g} giây")
+                                               + "; cần giám thị kiểm tra."))
                 if track.head_down_rule.update(track.posture == "head_down", now):
                     events.append(("head_down", f"Cúi xuống kéo dài ít nhất {self.settings.standing_seconds:g} giây; cần giám thị kiểm tra."))
                 if track.moving_rule.update(track.posture == "moving", now):

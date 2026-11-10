@@ -7,7 +7,7 @@
     body_lean: 'TƯ THẾ · NGẢ NGƯỜI', negative_emotion: 'CẢM XÚC TIÊU CỰC ≥ 20 GIÂY', tired: 'HỖ TRỢ · DẤU HIỆU MỆT MỎI', proctor_dwell: 'NHẮC GIÁM THỊ · ĐỨNG LÂU CẠNH BÀN',
   };
   const SHORT = {
-    phone: 'Điện thoại', head_turning: 'Quay đầu', standing: 'Nhổm dậy', head_down: 'Cúi xuống', moving: 'Rời chỗ',
+    phone: 'Điện thoại', head_turning: 'Quay đầu', standing: 'Đứng dậy', head_down: 'Cúi xuống', moving: 'Rời chỗ',
     arm_raise: 'Giơ tay', body_lean: 'Ngả người', negative_emotion: 'Cảm xúc tiêu cực', tired: 'Mệt mỏi', proctor_dwell: 'Giám thị đứng lâu',
   };
   const CATEGORIES = ['Sử dụng điện thoại', 'Nhìn bài / trao đổi', 'Rời khỏi chỗ', 'Nói chuyện', 'Sử dụng tài liệu',

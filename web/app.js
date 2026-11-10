@@ -2,7 +2,7 @@
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const emotionNames = {angry:'Giận dữ',disgust:'Ghê sợ',fear:'Sợ hãi',happy:'Vui vẻ',sad:'Buồn',surprise:'Ngạc nhiên',neutral:'Trung tính',unknown:'Chưa rõ'};
-const postureNames = {seated:'Ngồi đúng tư thế',standing:'Dấu hiệu đứng lên',head_down:'Cúi xuống',moving:'Rời chỗ / di chuyển',uncalibrated:'Chờ mốc ngồi (ngồi yên ~3 giây)',insufficient:'Không đủ dữ liệu'};
+const postureNames = {seated:'Ngồi đúng tư thế',standing:'Đứng dậy',head_down:'Cúi xuống',moving:'Rời chỗ / di chuyển',uncalibrated:'Chờ mốc ngồi (ngồi yên ~3 giây)',insufficient:'Không đủ dữ liệu'};
 const moodNames = {normal:'Bình thường',anxious:'Lo lắng',tired:'Mệt mỏi',sad:'Buồn',unknown:'Chưa rõ'};
 const moodOf = (t) => t.tired ? 'tired' : ({neutral:'normal',happy:'normal',fear:'anxious',surprise:'anxious',angry:'anxious',disgust:'anxious',sad:'sad'})[t.emotion] || 'unknown';
 let maxPeople = 25, frameWidth = 1280;
@@ -358,7 +358,7 @@ function draw() {
       const alerting = t.role!=='proctor' && (t.has_phone || t.head_turning || ['standing','head_down','moving'].includes(t.posture));
       ctx.strokeStyle = t.role==='proctor' ? '#7fb7ff' : alerting ? '#ff7a59' : t.student_id ? '#c7e895' : '#f0cd86'; ctx.lineWidth=2;
       ctx.strokeRect(x*w,y*h,bw*w,bh*h);
-      const label = t.role==='proctor' ? `${t.name} · Giám thị${t.dwell_seconds?` · ${Math.round(t.dwell_seconds)}s`:''}` : `${t.name} · ${t.has_phone ? 'Điện thoại' : t.head_turning ? `Quay mặt ${sideText(t.head_yaw)}` : ['standing','head_down','moving'].includes(t.posture) ? (t.exited ? 'Đứng dậy (ra khỏi khung)' : postureNames[t.posture]) : moodNames[moodOf(t)]}`;
+      const label = t.role==='proctor' ? `${t.name} · Giám thị${t.dwell_seconds?` · ${Math.round(t.dwell_seconds)}s`:''}` : `${t.name} · ${t.has_phone ? 'Điện thoại' : t.head_turning ? `Quay mặt ${sideText(t.head_yaw)}` : ['standing','head_down','moving'].includes(t.posture) ? (t.exited ? 'Đứng dậy (rời khung hình)' : postureNames[t.posture]) : moodNames[moodOf(t)]}`;
       ctx.font=`${Math.max(12,Math.round(w/65))}px Segoe UI`;
       const tw=ctx.measureText(label).width+14;
       const ly=Math.max(25,y*h-4);

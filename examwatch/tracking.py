@@ -114,7 +114,7 @@ def apply_thresholds(track, settings):
     # A small host analyses a frame every 1.5-3 s; a 2.5 s gap used to restart
     # the timers, so 'standing' could never be confirmed.
     for rule in (track.standing_rule, track.head_down_rule, track.moving_rule):
-        rule.max_gap = 5.0
+        rule.max_gap = 8.0
     track.head_rule.max_gap = 4.0
     track.head_down_rule.seconds = settings.standing_seconds
     track.moving_rule.seconds = max(2.0, settings.standing_seconds / 2)
@@ -142,7 +142,10 @@ class Tracker:
 
     def update(self, boxes, now):
         self.remember_calibrations()
-        self.tracks = {k: t for k, t in self.tracks.items() if now - t.last_seen < 8.0}
+        # Someone who stood up out of the frame stays (as 'standing') while the seat
+        # is empty, so the alert can be confirmed on the next slow frame.
+        self.tracks = {k: t for k, t in self.tracks.items()
+                       if now - t.last_seen < 8.0 or (t.exit_up_at is not None and now - t.exit_up_at < 60.0)}
         # Conservative overlap matching. Ambiguous matches become new unknown tracks.
         pairs = []
         for index, box in enumerate(boxes):

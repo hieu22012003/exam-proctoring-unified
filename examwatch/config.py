@@ -102,7 +102,7 @@ ADVANCED = {
     "arm_threshold":         (20, 120, None, "body", "Góc tay so với thân (độ)", ""),
     "standing_rise":         (.2, 1.5, .5, "standing", "Độ nâng đầu (× chiều cao mặt)",
                               "0,5 = đầu nâng lên nửa khuôn mặt so với lúc ngồi."),
-    "stand_seconds":         (.5, 60, 1.5, "standing", "Giữ nhổm dậy (giây)", ""),
+    "stand_seconds":         (.5, 60, 1.5, "standing", "Giữ đứng dậy (giây)", ""),
     "negative_seconds":      (5, 300, 20.0, "other", "Cảm xúc tiêu cực kéo dài (giây)", ""),
     "alert_cooldown":        (2, 120, 6.0, "other", "Giãn cách 2 cảnh báo cùng loại (giây)", ""),
     "min_face_ratio":        (0, .9, 0.0, "other", "Bỏ qua mặt nhỏ (× mặt lớn nhất)",
@@ -113,13 +113,13 @@ ADVANCED = {
 
 ALERT_KINDS = {
     "phone": "Điện thoại", "head_turning": "Quay mặt / nhìn bài", "body_lean": "Nghiêng thân",
-    "arm_raise": "Giơ / vươn tay", "standing": "Nhổm dậy", "head_down": "Cúi xuống",
+    "arm_raise": "Giơ / vươn tay", "standing": "Đứng dậy", "head_down": "Cúi xuống",
     "moving": "Rời chỗ", "negative_emotion": "Cảm xúc tiêu cực", "tired": "Mệt mỏi",
     "proctor_dwell": "Giám thị đứng lâu cạnh bàn",
 }
 
 ADVANCED_GROUPS = {"phone": "Điện thoại", "head": "Quay mặt / nhìn bài", "body": "Nghiêng người & tay",
-                   "standing": "Nhổm dậy", "other": "Khác"}
+                   "standing": "Đứng dậy / nhổm dậy", "other": "Khác"}
 
 
 def validate_advanced(values):

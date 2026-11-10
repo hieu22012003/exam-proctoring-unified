@@ -143,6 +143,10 @@ def mouth_points(face, width, height):
     return [left,[(left[0]+right[0])/2,(left[1]+right[1])/2],right]
 
 
+
+# Face box height (fraction of the frame) from which the camera counts as close-up.
+CLOSE_FACE = 0.18
+
 class Vision:
     def __init__(self, settings):
         import onnxruntime as ort
@@ -371,13 +375,19 @@ class Vision:
             track.near_top = track.box[1] < .03 and track.box[3] <= 1.4 * base["scale"]
 
     def _left_upwards(self, track, rises, now):
-        """Did this calibrated person just leave the frame through the top?"""
+        """Did this calibrated person just stand up and leave the frame?"""
         if track.rise_seen >= .35 or track.near_top:
+            return True
+        # Close camera (one candidate, face a large part of the picture): a face this
+        # size is not simply missed by the detector, and the pose would still find
+        # the body if the head were turned or bowed. An empty seat here means the
+        # candidate stood up (or left), even when no analysed frame caught the rise.
+        if track.box[3] >= CLOSE_FACE and track.box[3] <= 1.3 * track.baseline["scale"]:
             return True
         cx, width = track.box[0] + track.box[2] / 2, track.box[2]
         # The browser runs pose at ~15 FPS and reports noses that rose and left
         # through the top edge (web/live-pose.js), which the 1 FPS server misses.
-        return any(age <= 4.0 and abs(x - cx) < max(.12, 1.2 * width) for x, age in (rises or []))
+        return any(age <= 8.0 and abs(x - cx) < max(.12, 1.2 * width) for x, age in (rises or []))
 
     def blendshapes(self, frame, face):
         h, w = frame.shape[:2]
@@ -607,7 +617,9 @@ class Vision:
             if track in tracks or not track.baseline:
                 continue
             if track.exit_up_at is None:
-                if now - track.last_seen > 3.5 or not self._left_upwards(track, rises, now):
+                # Frames can be 4 s apart on a small host: judge on the first frame
+                # without this person, however late it comes.
+                if now - track.last_seen > 7.5 or not self._left_upwards(track, rises, now):
                     continue
                 track.exit_up_at = now
             track.posture, track.landmarks, track.mouth_points = 'standing', [], []

@@ -77,10 +77,44 @@ def test_browser_report_catches_a_stand_between_two_analysed_frames():
     assert len(alerts) == 1 and person.posture == "standing"
 
 
-def test_face_lost_without_a_rise_is_not_standing():
-    """Hand over the face, camera bumped, a dropped frame: no evidence of standing."""
+def test_close_camera_empty_seat_is_standing_even_4s_apart():
+    """Customer test 10/11 18:50: frames ~4 s apart, the rise was never in a frame."""
     v, alerts = make_vision(), []
     person, now = calibrated(v, alerts)
+    empty(v)
+    for _ in range(3):
+        now += 4.0
+        tracks = step(v, now, alerts)
+    assert [t.id for t in tracks] == [person.id] and person.exit_up_at
+    assert len(alerts) == 1
+
+
+def test_one_missed_frame_on_a_close_camera_is_not_an_alert():
+    v, alerts = make_vision(), []
+    person, now = calibrated(v, alerts)
+    empty(v)
+    now += 4.0
+    step(v, now, alerts)
+    seated(v)
+    for _ in range(3):
+        now += 4.0
+        step(v, now, alerts)
+    assert alerts == [] and person.posture == "seated"
+
+
+def far_seat(v):
+    v.face_rows = [face_row(cx=.3, cy=.5, size=.06)]
+    v.remote.poses = [body(cx=.3, nose=(.3, .5), shoulders_y=.58, sw=.1, ears=((.28, .5, .9), (.32, .5, .9)))]
+
+
+def test_far_camera_face_lost_without_a_rise_is_not_standing():
+    """Room camera: small faces are missed by the detector now and then."""
+    v, alerts = make_vision(), []
+    far_seat(v)
+    now = 0.0
+    while now < 5:
+        step(v, now, alerts)
+        now += 1 / FPS
     empty(v)
     for _ in range(4):
         now += 1 / FPS
@@ -90,12 +124,30 @@ def test_face_lost_without_a_rise_is_not_standing():
 
 def test_report_from_another_seat_is_ignored():
     v, alerts = make_vision(), []
-    person, now = calibrated(v, alerts)
+    far_seat(v)
+    now = 0.0
+    while now < 5:
+        step(v, now, alerts)
+        now += 1 / FPS
     empty(v)
     for _ in range(4):
         now += 1 / FPS
-        step(v, now, alerts, rises=[(.95, .5)])
+        step(v, now, alerts, rises=[(.9, .5)])
     assert alerts == []
+
+
+def test_far_camera_browser_report_is_standing():
+    v, alerts = make_vision(), []
+    far_seat(v)
+    now = 0.0
+    while now < 5:
+        step(v, now, alerts)
+        now += 1 / FPS
+    empty(v)
+    for _ in range(3):
+        now += 4.0
+        step(v, now, alerts, rises=[(.3, 2.0)])
+    assert len(alerts) == 1
 
 
 def test_leaning_into_the_camera_is_not_standing():
