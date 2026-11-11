@@ -95,6 +95,34 @@ def plausible_phone(bw, bh, owner=None):
     return True
 
 
+# A phone in use is in a hand. Boxes with no visible wrist/hand nearby (customer
+# test 2026-11-11: the shirt front at 38-50 %, a poster at 39 %) only count when
+# the detector is very sure. A real phone in a dim room scored 36-49 %, so the
+# confidence threshold alone cannot separate the two.
+PHONE_STRONG, PHONE_STRONG_MARGIN = .65, .25
+HAND_POINTS = (15, 16, 17, 18, 19, 20, 21, 22)
+
+
+def hand_near(cx, cy, bw, bh, track, aspect=16 / 9):
+    """Is a visible wrist or hand landmark of this person at the phone box?
+
+    Distances are in frame heights (x scaled by the aspect ratio); the reach is
+    three quarters of the box's longer side, at least 8 % of the frame height."""
+    lm = getattr(track, 'landmarks', None) or []
+    reach = max(.08, .75 * max(bw * aspect, bh))
+    for i in HAND_POINTS:
+        if i >= len(lm) or len(lm[i]) < 4 or lm[i][3] < .4:
+            continue
+        x, y = lm[i][0], lm[i][1]
+        if not (-.02 <= x <= 1.02 and -.02 <= y <= 1.02):
+            continue  # extrapolated outside the picture: not a seen hand
+        dx = max(0.0, abs(x - cx) - bw / 2) * aspect
+        dy = max(0.0, abs(y - cy) - bh / 2)
+        if dx * dx + dy * dy <= reach * reach:
+            return True
+    return False
+
+
 # Unmatched frontal face checks before a known name is dropped. A turned face
 # never counts: SFace cannot match a profile, which is not a different person.
 IDENTITY_MISSES = 3
@@ -664,9 +692,17 @@ class Vision:
                 self.phone_boxes, self.phone_at = [], now
         if not self.settings.phone_enabled:
             self.phone_boxes = []
+        if fresh:
+            # Slow hosts scan every few seconds: the allowed gap follows the real cadence.
+            previous, self.phone_scan_at = getattr(self, 'phone_scan_at', None), now
+            cadence = now - previous if previous is not None and 0 < now - previous < 15 else 0
+            for track in tracks:
+                track.phone_rule.max_gap = min(12.0, max(1.6, self.settings.phone_interval * 2.5, 2.2 * cadence))
         for track in tracks:
             track.phone_seen = False
             track.phone_confidence = 0.0
+            track.phone_box = None
+        strong = max(PHONE_STRONG, self.settings.phone_confidence + PHONE_STRONG_MARGIN)
         phones = []
         for box in getattr(self, 'phone_boxes', []):
             cx, cy, confidence = (float(v) for v in box[:3])
@@ -677,14 +713,21 @@ class Vision:
             owner = assign_phone(cx, cy, tracks)
             if sized and owner is not None and not plausible_phone(bw, bh, owner):
                 continue
+            held = owner is not None and hand_near(cx, cy, bw, bh, owner, w / h)
+            counted = owner is not None and (held or confidence >= strong)
+            # `counted` False = drawn nowhere and never an alert (no hand at the box).
             phones.append({"bbox": [cx - bw / 2, cy - bh / 2, bw, bh], "confidence": round(confidence, 3),
-                           "track_id": owner.id if owner else None})
-            if owner is not None and confidence > owner.phone_confidence:
+                           "track_id": owner.id if owner else None, "held": held, "counted": counted})
+            if counted and confidence > owner.phone_confidence:
                 owner.phone_seen, owner.phone_confidence = True, confidence
-        # One box is not enough: the phone must keep being detected for
+                owner.phone_box = (cx, cy, bw, bh)
+        # One box is not enough: the same phone must keep being detected for
         # phone_confirm_seconds (boxes are reused between scans, so count scans only).
         for track in tracks:
-            if fresh and track.phone_seen:
-                track.phone_rule.hit(now)
+            if fresh:
+                if track.phone_seen:
+                    track.phone_rule.hit(now, track.phone_box)
+                else:
+                    track.phone_rule.miss(now)
             track.has_phone = track.phone_rule.confirmed(now)
         return tracks, len(all_faces) > self.settings.max_people, phones

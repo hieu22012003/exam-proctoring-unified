@@ -53,6 +53,8 @@ class Track:
     has_phone: bool = False
     phone_confidence: float = 0.0
     phone_alert_at: float = -1e9
+    phone_alert_run: int = -1         # phone episode (phone_rule.run) already reported
+    phone_box: tuple | None = None    # best counted box of the last scan
     phone_seen: bool = False          # a box this frame, not yet confirmed
     phone_rule: Persistence = field(default_factory=lambda: Persistence(1.0))
     head_turning: bool = False
