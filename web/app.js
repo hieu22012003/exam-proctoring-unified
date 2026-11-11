@@ -314,7 +314,10 @@ function renderPeople() {
 // were when the server analysed the frame (~1 s earlier on a small host).
 const livePoseOn = () => $('live-pose')?.checked !== false;
 function followLive(t, pose) {
-  const n = t.landmarks[0], dx = pose[0][0] - n[0], dy = pose[0][1] - n[1];
+  // Head movement since the analysed frame, from the face points seen in both.
+  const d = window.ExamWatchLivePose.shift(t.landmarks, pose);
+  if (!d) return t;
+  const [dx, dy] = d;
   const shift = (p) => [p[0] + dx, p[1] + dy, ...p.slice(2)];
   const ls = pose[11], rs = pose[12];
   const target = ls && rs && ls[3] > .5 && rs[3] > .5 ? [(ls[0] + rs[0]) / 2, (ls[1] + rs[1]) / 2]
@@ -344,6 +347,12 @@ function draw() {
       const {byTrack, unused} = LP.match(pairedTracks, poses);
       spare = unused.map((i) => poses[i]);
       drawList = pairedTracks.map((t, i) => byTrack.has(i) ? followLive(t, poses[byTrack.get(i)]) : t);
+    }
+    // Glide to each new result instead of jumping (not in 'Khớp khung AI' mode,
+    // where the drawing must sit exactly on the analysed frame).
+    if (drawList && capturing && !syncMode() && LP?.settle) {
+      const drawnAt = performance.now();
+      drawList = drawList.map((t) => LP.settle(t, drawnAt));
     }
     if (spare.length && $('show-pose').checked) {
       // A person the server has not analysed yet: thin grey skeleton only.
@@ -389,10 +398,11 @@ function draw() {
       }
     }
     if (pairedTracks && performance.now()-trackAt < 1800 && $('show-phones')?.checked !== false) {
-      // Every raw phone box, so the proctor sees what the model reacts to
-      // (dashed = not attributed to any candidate).
+      // Phone boxes that count towards an alert: at a candidate's hand, or very
+      // confident. Boxes the server ignores (shirt, poster...) are not drawn.
       ctx.lineWidth = 2; ctx.font = `${Math.max(11,Math.round(w/75))}px Segoe UI`;
       for (const p of phones) {
+        if (p.counted === false) continue;
         const [x,y,bw,bh] = p.bbox;
         ctx.setLineDash(p.track_id == null ? [6,4] : []);
         ctx.strokeStyle = '#ff4d6d'; ctx.strokeRect(x*w,y*h,bw*w,bh*h);

@@ -214,8 +214,11 @@ class Runtime:
         """Phone, head turning, lean and arm events for one person."""
         s, events = self.settings, []
         cooldown = s.alert_cooldown
-        if track.has_phone and now - track.phone_alert_at >= cooldown:
-            track.phone_alert_at = now
+        # One alert per phone episode: while the same phone stays in view (or drops
+        # out for a moment) it is not reported again every `cooldown` seconds.
+        if (track.has_phone and track.phone_rule.run != track.phone_alert_run
+                and now - track.phone_alert_at >= cooldown):
+            track.phone_alert_at, track.phone_alert_run = now, track.phone_rule.run
             events.append(("phone", f"Phát hiện điện thoại gần {track.name} ({track.phone_confidence:.0%}), "
                                     f"thấy liên tục ≥ {s.phone_confirm_seconds:g} giây; cần giám thị kiểm tra."))
         h, w = frame.shape[:2]

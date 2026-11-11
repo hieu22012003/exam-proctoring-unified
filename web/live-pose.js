@@ -13,7 +13,117 @@ const MODEL = 'https://storage.googleapis.com/mediapipe-models/pose_landmarker/p
 const MIN_INTERVAL_MS = 66; // ~15 FPS is plenty for drawing and keeps laptops cool
 
 const state = { ready: false, failed: null, loading: null, landmarker: null, poses: [], at: 0, lastTs: -1, ms: 0,
-  chains: [], exits: [] };
+  chains: [], exits: [], slots: [], nextSlot: 1 };
+
+/* Steady overlay (customer test 2026-11-11: boxes and skeleton looked jittery).
+ * Pose Lite landmarks shake by a few pixels from frame to frame even when the
+ * person sits still. Each person's landmarks go through a One Euro filter: strong
+ * smoothing while still, almost none during a fast move, so the skeleton neither
+ * shimmers nor trails behind. app.js then eases what it draws on every screen
+ * refresh (settle), which also turns the server's 3-4 box updates per second
+ * into a glide instead of jumps. */
+const EURO = { minCutoff: 1.2, beta: 6.0, dCutoff: 1.0 };
+const SLOT_GATE = 0.15, SLOT_KEEP_MS = 500, VIS_ALPHA = 0.35;
+
+const lowpass = (cutoff, dt) => 1 / (1 + 1 / (2 * Math.PI * cutoff * dt));
+function euro(f, value, dt) {
+  if (f.x === undefined) { f.x = value; f.v = 0; return value; }
+  f.v += lowpass(EURO.dCutoff, dt) * ((value - f.x) / dt - f.v);
+  f.x += lowpass(EURO.minCutoff + EURO.beta * Math.abs(f.v), dt) * (value - f.x);
+  return f.x;
+}
+
+/** One Euro smoothing per person; each returned pose carries a stable `slot` id. */
+function smooth(poses, now) {
+  state.slots = state.slots.filter((s) => now - s.at <= SLOT_KEEP_MS);
+  const pairs = [];
+  poses.forEach((p, pi) => state.slots.forEach((s, si) => {
+    const d = Math.hypot(p[0][0] - s.x, p[0][1] - s.y);
+    if (d < SLOT_GATE) pairs.push([d, pi, si]);
+  }));
+  pairs.sort((a, b) => a[0] - b[0]);
+  const slotOf = new Map(), taken = new Set();
+  for (const [, pi, si] of pairs) {
+    if (slotOf.has(pi) || taken.has(si)) continue;
+    slotOf.set(pi, state.slots[si]); taken.add(si);
+  }
+  return poses.map((pose, pi) => {
+    let slot = slotOf.get(pi);
+    if (!slot) { slot = { id: state.nextSlot++, filters: [], vis: [], at: now }; state.slots.push(slot); }
+    const dt = Math.min(0.25, Math.max(0.001, (now - slot.at) / 1000));
+    slot.x = pose[0][0]; slot.y = pose[0][1]; slot.at = now;
+    const out = pose.map((l, i) => {
+      const f = slot.filters[i] || (slot.filters[i] = [{}, {}]);
+      // A point coming back into view starts from where it is, not from where the
+      // filter last saw it.
+      if ((slot.vis[i] ?? 0) < 0.3) { f[0] = {}; f[1] = {}; }
+      slot.vis[i] = slot.vis[i] === undefined ? l[3] : slot.vis[i] + VIS_ALPHA * (l[3] - slot.vis[i]);
+      return [euro(f[0], l[0], dt), euro(f[1], l[1], dt), l[2], slot.vis[i]];
+    });
+    out.slot = slot.id;
+    return out;
+  });
+}
+
+const FACE_POINTS = [0, 2, 5, 7, 8]; // nose, eyes, ears
+
+/** How far the head moved between the analysed frame (server landmarks) and the
+ * live pose. The mean of the face points seen in both is used: the nose alone
+ * swings sideways when the head turns, which slid the box off the face. */
+function shift(serverLandmarks, pose) {
+  let dx = 0, dy = 0, n = 0;
+  for (const i of FACE_POINTS) {
+    const a = serverLandmarks?.[i], b = pose?.[i];
+    if (!a || !b || a[3] < 0.5 || b[3] < 0.5) continue;
+    dx += b[0] - a[0]; dy += b[1] - a[1]; n += 1;
+  }
+  return n ? [dx / n, dy / n] : null;
+}
+
+const shown = new Map(); // track id -> what is on screen now
+const TAU = { live: { pos: 0.06, size: 0.25, points: 0.04 }, server: { pos: 0.14, size: 0.25, points: 0.14 } };
+const SIZE_DEADBAND = 0.004, SNAP = 0.25;
+
+function easePoints(prev, next, k) {
+  if (!prev || prev.length !== next.length) return next;
+  return next.map((p, i) => {
+    const q = prev[i];
+    if (!q || (q[3] ?? 1) < 0.3 || Math.abs(p[0] - q[0]) > SNAP || Math.abs(p[1] - q[1]) > SNAP) return p;
+    return [q[0] + k * (p[0] - q[0]), q[1] + k * (p[1] - q[1]), ...p.slice(2)];
+  });
+}
+
+/** The track as it should be drawn now: box, skeleton, mouth and lean line glide
+ * towards the latest result instead of jumping to it. */
+function settle(track, now = performance.now()) {
+  const tau = track.live ? TAU.live : TAU.server;
+  const old = shown.get(track.id);
+  const [x, y, w, h] = track.bbox;
+  if (!old || now - old.at > 600 || now < old.at || Math.abs(x - old.bbox[0]) > SNAP || Math.abs(y - old.bbox[1]) > SNAP) {
+    const first = { at: now, bbox: [x, y, w, h], landmarks: track.landmarks, mouth: track.mouth_points, lean: track.lean_target };
+    shown.set(track.id, first);
+    return track;
+  }
+  const dt = Math.min(0.25, (now - old.at) / 1000);
+  const k = (t) => 1 - Math.exp(-dt / t);
+  const b = old.bbox, kp = k(tau.pos), ks = k(tau.size);
+  // The centre glides; the size only follows real changes (face-detector noise
+  // made the frame "breathe").
+  const nw = Math.abs(w - b[2]) < SIZE_DEADBAND ? b[2] : b[2] + ks * (w - b[2]);
+  const nh = Math.abs(h - b[3]) < SIZE_DEADBAND ? b[3] : b[3] + ks * (h - b[3]);
+  const cx = b[0] + b[2] / 2 + kp * (x + w / 2 - b[0] - b[2] / 2);
+  const cy = b[1] + b[3] / 2 + kp * (y + h / 2 - b[1] - b[3] / 2);
+  const next = {
+    at: now, bbox: [cx - nw / 2, cy - nh / 2, nw, nh],
+    landmarks: easePoints(old.landmarks, track.landmarks || [], k(tau.points)),
+    mouth: easePoints(old.mouth, track.mouth_points || [], kp),
+    lean: track.lean_target && old.lean ? easePoints([old.lean], [track.lean_target], k(tau.points))[0] : track.lean_target,
+  };
+  shown.set(track.id, next);
+  if (shown.size > 64) for (const [id, s] of shown) if (now - s.at > 2000) shown.delete(id);
+  return { ...track, bbox: next.bbox, landmarks: next.landmarks, mouth_points: next.mouth, lean_target: next.lean };
+}
+function unsettle() { shown.clear(); }
 
 /* Heads that rose and left through the top of the frame.
  * Standing up in front of a close webcam takes the head out of the picture in
@@ -109,15 +219,17 @@ function detect(video, now = performance.now()) {
   if (!state.ready || !video || ('readyState' in video && video.readyState < 2) || !width) return [];
   if (now - state.at < MIN_INTERVAL_MS) return state.poses;
   const ts = Math.max(state.lastTs + 1, Math.round(now));
+  let raw = [];
   try {
     const started = performance.now();
     const result = state.landmarker.detectForVideo(video, ts);
     state.ms = performance.now() - started;
-    state.poses = (result.landmarks || []).map((pose) => pose.map((l) => [l.x, l.y, l.z ?? 0, l.visibility ?? 1]));
+    raw = (result.landmarks || []).map((pose) => pose.map((l) => [l.x, l.y, l.z ?? 0, l.visibility ?? 1]));
   } catch (error) {
-    state.poses = [];
+    raw = [];
   }
-  follow(state.poses, now);
+  follow(raw, now);              // standing-up exits use the unfiltered positions
+  state.poses = smooth(raw, now);
   state.lastTs = ts; state.at = now;
   return state.poses;
 }
@@ -144,6 +256,6 @@ function match(tracks, poses, maxAge = 1.0) {
   return { byTrack, unused: poses.map((_, i) => i).filter((i) => !used.has(i)) };
 }
 
-const api = { init, detect, match, exits, follow, get ready() { return state.ready; }, get failed() { return state.failed; }, get ms() { return state.ms; } };
+const api = { init, detect, match, exits, follow, smooth, shift, settle, unsettle, get ready() { return state.ready; }, get failed() { return state.failed; }, get ms() { return state.ms; } };
 if (typeof window !== 'undefined') window.ExamWatchLivePose = api;
 export default api;

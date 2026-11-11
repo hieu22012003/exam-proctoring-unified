@@ -187,29 +187,51 @@ class Sustained:
 
 @dataclass
 class Persistence:
-    """Confirmed once a detector keeps reporting for `seconds` with gaps <= max_gap.
+    """Confirmed once a detector keeps reporting the same thing for `seconds`.
 
-    Unlike Sustained it needs no negative observations: a detector that simply
-    stops reporting counts as 'gone' after max_gap. Used for phone boxes, which
-    arrive only every phone_interval seconds."""
+    Used for phone boxes, which arrive only on detector scans. Customer test
+    2026-11-11: after one real phone, scattered false boxes (shirt, poster) kept
+    the old time-only chain alive and raised alert after alert. Now:
+    - two scans in a row without a box end the run (`miss`), whatever the clock says;
+    - a box somewhere else is a different object and starts a new run;
+    - `run` numbers the episodes so one phone gives one alert; a short dropout
+      (< `release` seconds, same place) continues the same episode."""
     seconds: float
     max_gap: float = 1.6
     since: float | None = None
     last: float | None = None
     hits: int = 0
+    misses: int = 0
+    at: tuple | None = None     # (cx, cy, w, h) of the last box
+    run: int = 0
+    release: float = 5.0
 
     def reset(self):
-        self.since = self.last = None
-        self.hits = 0
+        self.since = self.last = self.at = None
+        self.hits = self.misses = 0
 
-    def hit(self, now):
-        if self.last is None or now - self.last > self.max_gap or now < self.last:
+    def hit(self, now, box=None):
+        moved = False
+        if box is not None and self.at is not None:
+            reach = max(.08, 1.5 * max(box[2], box[3], self.at[2], self.at[3]))
+            moved = abs(box[0] - self.at[0]) > reach or abs(box[1] - self.at[1]) > reach
+        stale = self.last is None or now - self.last > self.max_gap or now < self.last
+        if stale or moved or self.misses > 1:
+            if self.last is None or moved or now < self.last or now - self.last > self.release:
+                self.run += 1
             self.since, self.hits = now, 0
-        self.last = now
+        self.last, self.misses = now, 0
         self.hits += 1
+        if box is not None:
+            self.at = tuple(float(v) for v in box[:4])
+
+    def miss(self, now):
+        """A detector scan that saw this person but no phone."""
+        if self.last is not None:
+            self.misses += 1
 
     def confirmed(self, now):
-        if self.last is None or now - self.last > self.max_gap:
+        if self.last is None or now - self.last > self.max_gap or self.misses > 1:
             return False
         return now - self.since >= self.seconds and self.hits >= (1 if self.seconds <= 0 else 2)
 
