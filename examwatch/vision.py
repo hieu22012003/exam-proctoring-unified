@@ -402,6 +402,31 @@ class Vision:
             # makes it larger instead).
             track.near_top = track.box[1] < .03 and track.box[3] <= 1.4 * base["scale"]
 
+    @staticmethod
+    def _moved_aside(track, visible):
+        """Did this lost person simply shift sideways in the seat?
+
+        On a close camera at ~0.5 analysed frames per second, sliding a chair or
+        leaning to one side moves the face more than a face width between two
+        frames. The tracker then starts a new track at the new spot, and the old,
+        calibrated one was taken for 'stood up and left the frame': a frozen box
+        ('Đứng dậy (rời khung hình)') stayed on the empty spot and raised a
+        standing alert (customer video bbox_vanish, 13/11). A face of the same size
+        at the same height that appeared after this one was lost is that person."""
+        x, y, bw, bh = track.box
+        cx, cy = x + bw / 2, y + bh / 2
+        for other in visible:
+            if other is track or other.role == "proctor" or other.exit_up_at is not None:
+                continue
+            if other.first_seen <= track.last_seen:
+                continue  # was already there: a neighbour, not this person
+            ox, oy, ow, oh = other.box
+            if not .6 < oh / max(bh, 1e-9) < 1.6:
+                continue
+            if abs(oy + oh / 2 - cy) < bh and abs(ox + ow / 2 - cx) < 3 * max(bw, ow):
+                return True
+        return False
+
     def _left_upwards(self, track, rises, now):
         """Did this calibrated person just stand up and leave the frame?"""
         if track.rise_seen >= .35 or track.near_top:
@@ -643,6 +668,11 @@ class Vision:
         # the face comes back or the track expires.
         for track in list(self.tracker.tracks.values()):
             if track in tracks or not track.baseline:
+                continue
+            if self._moved_aside(track, tracks):
+                # Not an empty seat: the person is visible next to it. Drop a
+                # 'left the frame' state too (they sat back down off-centre).
+                track.exit_up_at = None
                 continue
             if track.exit_up_at is None:
                 # Frames can be 4 s apart on a small host: judge on the first frame

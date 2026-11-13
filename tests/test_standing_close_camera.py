@@ -216,6 +216,41 @@ def test_standing_is_confirmed_on_a_slow_host():
     assert len(alerts) == 1
 
 
+def portrait_face(cx, cy=.45, height=.36):
+    """The customer's webcam face box: ~15 % of the width, ~36 % of the height."""
+    from test_vision_pipeline import H
+    row = face_row(cx=cx, cy=cy, size=.15).copy()
+    k, top = height * H / row[3], cy * H - height * H / 2
+    for i in (1, 5, 7, 9, 11, 13):
+        row[i] = top + (row[i] - row[1]) * k
+    row[3] = height * H
+    return row
+
+
+def test_shifting_sideways_leaves_no_ghost_box_or_alert():
+    """Customer video bbox_vanish 13/11: sliding left/right in the seat left frozen
+    'Chưa xác định · Đứng dậy (rời khung hình)' boxes and standing alerts."""
+    v, alerts = make_vision(), []
+
+    def sit(cx):
+        v.face_rows = [portrait_face(cx)]
+        v.remote.poses = [body(cx=cx, nose=(cx, .45), shoulders_y=.85, sw=.45,
+                               ears=((cx - .07, .43, .9), (cx + .07, .43, .9)))]
+    sit(.53)
+    now = 0.0
+    while now < 5:
+        tracks = step(v, now, alerts)
+        now += 1 / FPS
+    assert tracks[0].baseline is not None
+    for cx in [.35, .35, .53, .72, .72, .53, .53, .53, .53]:
+        sit(cx)
+        now += 2.5
+        tracks = step(v, now, alerts)
+        assert len(tracks) == 1, "one person must give one box"
+        assert all(t.exit_up_at is None and t.posture != "standing" for t in tracks)
+    assert alerts == []
+
+
 def test_runtime_passes_the_browser_report_and_alerts(monkeypatch):
     from examwatch.runtime import Runtime
     clock = {"t": 1000.0}

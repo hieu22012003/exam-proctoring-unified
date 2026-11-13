@@ -88,6 +88,7 @@ class Track:
     exit_up_at: float | None = None    # when this calibrated person left upwards
     rise_seen: float = 0.0             # last head rise, in standing thresholds
     near_top: bool = False             # last face box touched the top edge at seat scale
+    first_seen: float = 0.0            # when this track was created
 
     def clear_identity(self, preserve_baseline=False):
         self.student_id, self.name = None, "Chưa xác định"
@@ -183,7 +184,8 @@ class Tracker:
         # unmatched face back to a known person lost at the same seat moments ago.
         proposals = []
         recent = [t for t in self.tracks.values()
-                  if t.id not in used and now - t.last_seen <= 3.0 and (t.student_id or t.baseline)]
+                  if t.id not in used and (t.student_id or t.baseline)
+                  and (now - t.last_seen <= 3.0 or t.exit_up_at is not None)]
         for index, box in enumerate(boxes):
             if index in matches:
                 continue
@@ -210,7 +212,7 @@ class Tracker:
                 track = matches[index]
             else:
                 self.counter += 1
-                track = Track(self.counter, box, now)
+                track = Track(self.counter, box, now, first_seen=now)
                 apply_thresholds(track, self.settings)
                 self.tracks[track.id] = track
             track.box, track.last_seen = box, now
